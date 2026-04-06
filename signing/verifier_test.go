@@ -22,7 +22,6 @@ import (
 
 // signingFixtures holds a ready-to-use signer + verifier pair.
 type signingFixtures struct {
-	caCertPEM    []byte
 	configSigner *signing.ConfigSigner
 	fileSigner   *signing.FileSigner
 	verifier     *signing.X509SignatureVerifier
@@ -46,7 +45,6 @@ func newSigningFixtures(t *testing.T) *signingFixtures {
 	pool.AppendCertsFromPEM(caCertPEM)
 
 	return &signingFixtures{
-		caCertPEM:    caCertPEM,
 		configSigner: cs,
 		fileSigner:   fs,
 		verifier:     signing.NewX509SignatureVerifier(pool),
@@ -247,6 +245,36 @@ func TestVerifyFile_MissingSignature(t *testing.T) {
 	// No signature set.
 	err := fx.verifier.VerifyFile(file, []byte("content"))
 	assert.ErrorIs(t, err, signing.ErrMissingSignature)
+}
+
+func TestVerifyFile_UnknownCA(t *testing.T) {
+	// Sign with CA-A, verify with CA-B — confirms VerifyFile threads through
+	// verifyCertChain the same way VerifyRemoteConfig does.
+	fx := newSigningFixtures(t)
+	content := []byte("binary package content")
+	file := &protobufs.DownloadableFile{}
+	require.NoError(t, fx.fileSigner.SignFile(file, content))
+
+	_, _, otherCAPEM, err := signing.GenerateECDSACA()
+	require.NoError(t, err)
+	otherPool := x509.NewCertPool()
+	otherPool.AppendCertsFromPEM(otherCAPEM)
+	wrongVerifier := signing.NewX509SignatureVerifier(otherPool)
+
+	err = wrongVerifier.VerifyFile(file, content)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "certificate chain verification failed")
+}
+
+func TestVerifyRemoteConfig_NilConfigMap(t *testing.T) {
+	// A config with a nil Config field (only ConfigHash set) must sign and
+	// verify correctly — exercises the configSignedPayload nil-Config branch.
+	fx := newSigningFixtures(t)
+	config := &protobufs.AgentRemoteConfig{
+		ConfigHash: []byte("hash-for-nil-config"),
+	}
+	require.NoError(t, fx.configSigner.SignConfig(config))
+	assert.NoError(t, fx.verifier.VerifyRemoteConfig(config))
 }
 
 func TestVerifyRemoteConfig_OversizedCertChain(t *testing.T) {

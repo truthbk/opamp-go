@@ -101,16 +101,20 @@ heap memory while still allowing byte-accurate signature verification.
 
 ### Resource limits on server-supplied data
 
-Two size limits protect the agent from a malicious or buggy server:
+Three size limits protect the agent from a malicious or buggy server:
 
 - **Package downloads** (`packagessyncer.go`): capped at `maxPackageBodyBytes` (512 MiB)
   via `io.LimitReader`. Downloads that exceed the limit are rejected before the content
   reaches the signature verifier.
-- **Control-plane responses** (`httpsender.go`): `receiveResponse` caps the HTTP
+- **HTTP control-plane responses** (`httpsender.go`): `receiveResponse` caps the HTTP
   response body at `maxControlPlaneBodyBytes` (16 MiB) via `io.LimitReader`. This
   prevents a malicious server from exhausting agent heap memory by sending oversized
   `ServerToAgent` protobuf messages containing large `Signature` or `SigningCertChain`
   fields.
+- **WebSocket control-plane frames** (`wsreceiver.go`): `NewWSReceiver` calls
+  `conn.SetReadLimit(maxControlPlaneBodyBytes)` so the same 16 MiB ceiling applies to
+  the WebSocket transport. Both transports now enforce identical limits, preventing an
+  attacker from bypassing the HTTP guard by using the WebSocket endpoint.
 
 ---
 
@@ -433,7 +437,7 @@ body size limits on received data:
 
 | Call site | Change |
 |---|---|
-| `client/internal/wsreceiver.go: NewWSReceiver` | Added `signatureVerifier signing.SignatureVerifier` parameter |
+| `client/internal/wsreceiver.go: NewWSReceiver` | Added `signatureVerifier` parameter; calls `conn.SetReadLimit(maxControlPlaneBodyBytes)` to cap WS frame size |
 | `client/internal/httpsender.go: HTTPSender.Run` | Added `signatureVerifier signing.SignatureVerifier` parameter |
 | `client/internal/httpsender.go: receiveResponse` | `io.LimitReader(resp.Body, maxControlPlaneBodyBytes+1)` guards against oversized ServerToAgent responses |
 | `client/wsclient.go` | Passes `c.common.SignatureVerifier` to `NewWSReceiver` |
@@ -453,7 +457,7 @@ All tests are in three locations:
 - `client/internal/receivedprocessor_signing_test.go` — unit tests for the
   remote-config signature enforcement in `receivedprocessor`.
 
-### `signing/verifier_test.go` — 12 tests
+### `signing/verifier_test.go` — 14 tests
 
 These tests validate every branch of the `X509SignatureVerifier` implementation.
 
@@ -467,10 +471,12 @@ These tests validate every branch of the `X509SignatureVerifier` implementation.
 | `TestVerifyRemoteConfig_WrongEKU` | A cert with `ExtKeyUsageServerAuth` but not `ExtKeyUsageCodeSigning` is rejected. | Extended Key Usage constraints limit what a certificate can be used for. Ignoring EKU would allow an attacker to repurpose a server TLS certificate for code signing. |
 | `TestVerifyRemoteConfig_MissingSignature` | A config with no `Signature` field returns `ErrMissingSignature`. | Hard-reject semantics require a specific sentinel error that the SDK can detect and act on. Tests that `errors.Is` works correctly so callers can distinguish "unsigned" from "bad signature". |
 | `TestVerifyRemoteConfig_OversizedCertChain` | A PEM bundle with 11 certificates returns an error containing "maximum allowed length". | Verifies the `maxCertChainLen` DoS protection boundary. Without this test a regression that removed the limit would not be detected. |
+| `TestVerifyRemoteConfig_NilConfigMap` | A config with a nil `Config` field (only `ConfigHash` set) signs and verifies correctly. | Exercises the `configSignedPayload` nil-Config branch; ensures the nil case does not produce an incorrect payload or panic. |
 | `TestVerifyFile_Valid` | A correctly signed file verifies without error. | Baseline correctness for the file signing path, which uses a different payload (raw bytes, not proto). |
 | `TestVerifyFile_TamperedContent` | Changing file bytes after signing causes a verification error. | Confirms the signature binds to the content, not just the metadata. An attacker who substitutes a different binary after the server signs should be detected. |
 | `TestVerifyFile_TamperedSig` | Corrupting the DER signature on a file causes an error. | Parallel to the config tampered-sig test; ensures both code paths have byte-level integrity checking. |
 | `TestVerifyFile_MissingSignature` | A file with no `Signature`/`SigningCertChain` returns `ErrMissingSignature`. | Same rationale as the config missing-signature test, covering the separate `VerifyFile` code path. |
+| `TestVerifyFile_UnknownCA` | Signing with CA-A and verifying with a CA-B pool causes `VerifyFile` to fail with "certificate chain verification failed". | Confirms `VerifyFile` threads through `verifyCertChain` — the cert-rejection path was previously covered only for `VerifyRemoteConfig`. |
 
 #### Test infrastructure
 
@@ -479,7 +485,7 @@ with arbitrary `NotBefore`/`NotAfter` values and EKU sets. This is needed for th
 expiry and wrong-EKU tests without exposing those parameters on the production API
 (production certs should always be short-lived with the correct EKU).
 
-### `signing/signer_test.go` — 4 tests
+### `signing/signer_test.go` — 3 tests
 
 These tests validate the server-side signing helpers.
 
@@ -487,8 +493,9 @@ These tests validate the server-side signing helpers.
 |---|---|---|
 | `TestConfigSigner_RoundTrip` | Sign then verify with the same CA — end-to-end sign-verify cycle. | Confirms that the signer and verifier agree on the canonical payload format. If either side diverges in how it constructs the bytes to sign, a round-trip test will catch it. |
 | `TestFileSigner_RoundTrip` | Sign a file then verify the content — end-to-end for the file path. | Separate from the config round-trip because the payload construction differs (raw bytes vs. proto marshal). |
-| `TestConfigSigner_WrongCA` | Signing with CA-A and verifying with CA-B trust pool fails. | Confirms the trust anchor pool is enforced end-to-end, not just in the unit test for `verifyCertChain`. |
 | `TestConfigSigner_RejectsRSAKey` | Passing a `tls.Certificate` with an RSA private key to `NewConfigSigner` or `NewFileSigner` returns an error containing "ECDSA". | Directly tests the key-type enforcement path. A regression that silently accepted a non-ECDSA key would produce a panic or wrong signature at signing time. |
+
+Note: the cross-CA rejection scenario is covered by `TestVerifyRemoteConfig_UnknownCA` and `TestVerifyFile_UnknownCA` in `verifier_test.go`; a duplicate in `signer_test.go` was removed.
 
 ### `client/internal/receivedprocessor_signing_test.go` — 7 tests
 
@@ -551,8 +558,8 @@ their test behaviour entirely unchanged.
 | `signing/certs.go` | New | ECDSA P-256 CA and leaf cert generation helpers |
 | `signing/verifier.go` | New | `SignatureVerifier` interface + `X509SignatureVerifier` implementation |
 | `signing/signer.go` | New | `ConfigSigner` and `FileSigner` for server-side use |
-| `signing/verifier_test.go` | New | 12 unit tests for `X509SignatureVerifier` (including `maxCertChainLen` enforcement) |
-| `signing/signer_test.go` | New | 4 unit tests for `ConfigSigner` and `FileSigner` (including RSA key rejection) |
+| `signing/verifier_test.go` | New | 14 unit tests for `X509SignatureVerifier` (including `maxCertChainLen`, nil-Config, and `VerifyFile` cert-chain coverage) |
+| `signing/signer_test.go` | New | 3 unit tests for `ConfigSigner` and `FileSigner` (duplicate cross-CA test removed) |
 | `client/types/startsettings.go` | Modified | Added `SignatureVerifier signing.SignatureVerifier` field |
 | `client/internal/clientcommon.go` | Modified | `ErrSignatureVerifierRequired`, `SignatureVerifier` field, `validateCapabilities` guard, `PrepareStart` wiring |
 | `client/internal/receivedprocessor.go` | Modified | `signatureVerifier` field, `verifyRemoteConfigSignature` method, hard-reject logic in `ProcessReceivedMessage` |
@@ -565,4 +572,4 @@ their test behaviour entirely unchanged.
 | `client/internal/receivedprocessor_signing_test.go` | New | 7 unit tests for remote-config signing enforcement in `receivedprocessor` |
 | `client/internal/packagessyncer_test.go` | Modified | Updated `NewPackagesSyncer` call sites with `nil` verifier |
 | `client/internal/wsreceiver_test.go` | Modified | Updated `NewWSReceiver` call sites with `nil` verifier |
-| `client/internal/httpsender_test.go` | Modified | Updated `newReceivedProcessor` call sites with `nil` verifier |
+| `client/internal/httpsender_test.go` | Modified | Updated `newReceivedProcessor` call sites with `nil` verifier; added `TestHTTPSenderResponseBodySizeLimit` |

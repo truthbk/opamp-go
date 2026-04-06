@@ -138,6 +138,10 @@ func configSignedPayload(config *protobufs.AgentRemoteConfig) ([]byte, error) {
 			return nil, fmt.Errorf("cannot marshal config: %w", err)
 		}
 	}
+	// Guard against silent uint32 truncation on hypothetical 64-bit builds
+	// where a pathologically large proto marshal could exceed 4 GiB. In practice
+	// this is unreachable (proto.Marshal would OOM first), but the check is
+	// cheap and makes the cast auditable.
 	if len(configBytes) > math.MaxUint32 {
 		return nil, fmt.Errorf("config marshal too large (%d bytes) for 4-byte length prefix", len(configBytes))
 	}

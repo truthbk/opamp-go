@@ -40,22 +40,6 @@ func TestFileSigner_RoundTrip(t *testing.T) {
 	assert.NoError(t, fx.verifier.VerifyFile(file, content))
 }
 
-func TestConfigSigner_WrongCA(t *testing.T) {
-	// Sign with CA-A.
-	fx := newSigningFixtures(t)
-	config := sampleConfig()
-	require.NoError(t, fx.configSigner.SignConfig(config))
-
-	// Verify with a completely different CA pool (CA-B).
-	_, _, otherCAPEM, err := signing.GenerateECDSACA()
-	require.NoError(t, err)
-	otherPool := x509.NewCertPool()
-	otherPool.AppendCertsFromPEM(otherCAPEM)
-	wrongVerifier := signing.NewX509SignatureVerifier(otherPool)
-
-	assert.Error(t, wrongVerifier.VerifyRemoteConfig(config))
-}
-
 func TestConfigSigner_RejectsRSAKey(t *testing.T) {
 	// NewConfigSigner and NewFileSigner must return an error when given an RSA key
 	// rather than an ECDSA key.
@@ -74,11 +58,10 @@ func TestConfigSigner_RejectsRSAKey(t *testing.T) {
 	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &rsaKey.PublicKey, rsaKey)
 	require.NoError(t, err)
 
-	var certPEM, keyPEM pem.Block
-	certPEM = pem.Block{Type: "CERTIFICATE", Bytes: certDER}
+	certPEM := pem.Block{Type: "CERTIFICATE", Bytes: certDER}
 	keyDER, err := x509.MarshalPKCS8PrivateKey(rsaKey)
 	require.NoError(t, err)
-	keyPEM = pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}
+	keyPEM := pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}
 
 	tlsCert, err := tls.X509KeyPair(pem.EncodeToMemory(&certPEM), pem.EncodeToMemory(&keyPEM))
 	require.NoError(t, err)

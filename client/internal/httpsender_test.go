@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -741,4 +742,43 @@ func TestHTTPSenderOpAMPInstanceUIDHeader(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	srv.Close()
+}
+
+// recordingLogger captures the last logged error message for test assertions.
+type recordingLogger struct {
+	lastError string
+}
+
+func (l *recordingLogger) Debugf(_ context.Context, _ string, _ ...interface{}) {}
+func (l *recordingLogger) Errorf(_ context.Context, format string, v ...interface{}) {
+	l.lastError = fmt.Sprintf(format, v...)
+}
+
+// infiniteZeroReader generates zero bytes on demand without pre-allocation.
+type infiniteZeroReader struct{}
+
+func (infiniteZeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
+}
+
+func TestHTTPSenderResponseBodySizeLimit(t *testing.T) {
+	logger := &recordingLogger{}
+	h := NewHTTPSender(logger)
+
+	// Build a response whose body is exactly one byte over the limit.
+	// infiniteZeroReader generates bytes on demand; io.LimitReader caps the
+	// stream so io.ReadAll allocates only maxControlPlaneBodyBytes+1 bytes.
+	body := io.LimitReader(infiniteZeroReader{}, maxControlPlaneBodyBytes+1)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(body),
+	}
+
+	h.receiveResponse(context.Background(), resp)
+
+	assert.Contains(t, logger.lastError, "exceeds maximum allowed size",
+		"oversized response body must be rejected before proto.Unmarshal")
 }

@@ -48,6 +48,12 @@ func NewWSReceiver(
 		stopped:   make(chan struct{}),
 	}
 
+	// Cap incoming ServerToAgent frames to the same limit used by the HTTP
+	// transport, preventing a malicious server from exhausting heap memory.
+	if conn != nil {
+		conn.SetReadLimit(maxControlPlaneBodyBytes)
+	}
+
 	return w
 }
 
