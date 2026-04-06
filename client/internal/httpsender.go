@@ -30,6 +30,11 @@ const (
 	defaultPollingIntervalMs = 30 * 1000 // default interval is 30 seconds.
 )
 
+// maxControlPlaneBodyBytes is the maximum response body size accepted from the
+// OpAMP server for control-plane messages (ServerToAgent protobufs). This
+// prevents a malicious server from exhausting agent heap memory.
+const maxControlPlaneBodyBytes int64 = 16 * 1024 * 1024 // 16 MiB
+
 const (
 	headerContentEncoding = "Content-Encoding"
 	encodingTypeGZip      = "gzip"
@@ -366,13 +371,17 @@ func (h *HTTPSender) prepareRequest(ctx context.Context) (*requestWrapper, error
 }
 
 func (h *HTTPSender) receiveResponse(ctx context.Context, resp *http.Response) {
-	msgBytes, err := io.ReadAll(resp.Body)
+	limited := io.LimitReader(resp.Body, maxControlPlaneBodyBytes+1)
+	msgBytes, err := io.ReadAll(limited)
+	_ = resp.Body.Close()
 	if err != nil {
-		_ = resp.Body.Close()
 		h.logger.Errorf(ctx, "cannot read response body: %v", err)
 		return
 	}
-	_ = resp.Body.Close()
+	if int64(len(msgBytes)) > maxControlPlaneBodyBytes {
+		h.logger.Errorf(ctx, "response body exceeds maximum allowed size of %d bytes", maxControlPlaneBodyBytes)
+		return
+	}
 
 	var response protobufs.ServerToAgent
 	if err := proto.Unmarshal(msgBytes, &response); err != nil {

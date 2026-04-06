@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -136,6 +137,9 @@ func configSignedPayload(config *protobufs.AgentRemoteConfig) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("cannot marshal config: %w", err)
 		}
+	}
+	if len(configBytes) > math.MaxUint32 {
+		return nil, fmt.Errorf("config marshal too large (%d bytes) for 4-byte length prefix", len(configBytes))
 	}
 	payload := make([]byte, 4+len(configBytes)+len(config.GetConfigHash()))
 	binary.BigEndian.PutUint32(payload[:4], uint32(len(configBytes)))

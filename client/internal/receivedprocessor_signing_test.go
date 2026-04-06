@@ -197,16 +197,54 @@ func TestReceivedProcessor_SignatureIgnoredWithoutCapability(t *testing.T) {
 	assert.Nil(t, status)
 }
 
+func TestReceivedProcessor_NilVerifierWithCapabilityFails(t *testing.T) {
+	// When VerifiesRemoteConfigSignature is set but signatureVerifier is nil,
+	// the processor must hard-reject the config and report FAILED — not silently
+	// deliver it. validateCapabilities prevents this at Start() time; this test
+	// confirms the processor's own guard also produces the correct outcome.
+	config := &protobufs.AgentRemoteConfig{
+		Config: &protobufs.AgentConfigMap{
+			ConfigMap: map[string]*protobufs.AgentConfigFile{
+				"app.yaml": {Body: []byte("key: value")},
+			},
+		},
+		ConfigHash: []byte("hash-v1"),
+	}
+
+	caps := protobufs.AgentCapabilities_AgentCapabilities_AcceptsRemoteConfig |
+		protobufs.AgentCapabilities_AgentCapabilities_VerifiesRemoteConfigSignature |
+		protobufs.AgentCapabilities_AgentCapabilities_ReportsStatus
+
+	// nil verifier with the capability set
+	delivered, status := runProcessorWithRemoteConfig(t, config, nil, caps)
+	assert.False(t, delivered, "config must not reach OnMessage when verifier is nil")
+	require.NotNil(t, status, "FAILED status must be sent")
+	assert.Equal(t, protobufs.RemoteConfigStatuses_RemoteConfigStatuses_FAILED, status.Status)
+	assert.Contains(t, status.ErrorMessage, "SignatureVerifier is not configured")
+}
+
 func TestClientCommon_ErrSignatureVerifierRequired(t *testing.T) {
 	// PrepareStart (via validateCapabilities) must reject a signing capability
-	// when no SignatureVerifier is provided.
+	// when no SignatureVerifier is provided — covers both signing capability bits.
 	common := NewClientCommon(&sharedinternal.NopLogger{}, NewMockSender())
 
-	caps := protobufs.AgentCapabilities_AgentCapabilities_ReportsStatus |
-		protobufs.AgentCapabilities_AgentCapabilities_VerifiesRemoteConfigSignature
-	require.NoError(t, common.ClientSyncedState.SetCapabilities(&caps))
+	t.Run("VerifiesRemoteConfigSignature", func(t *testing.T) {
+		caps := protobufs.AgentCapabilities_AgentCapabilities_ReportsStatus |
+			protobufs.AgentCapabilities_AgentCapabilities_VerifiesRemoteConfigSignature
+		require.NoError(t, common.ClientSyncedState.SetCapabilities(&caps))
+		err := common.validateCapabilities(caps)
+		assert.ErrorIs(t, err, ErrSignatureVerifierRequired)
+	})
 
-	// SignatureVerifier is nil (not set) — validateCapabilities must return the sentinel error.
-	err := common.validateCapabilities(caps)
-	assert.ErrorIs(t, err, ErrSignatureVerifierRequired)
+	t.Run("VerifiesPackageSignatures", func(t *testing.T) {
+		caps := protobufs.AgentCapabilities_AgentCapabilities_ReportsStatus |
+			protobufs.AgentCapabilities_AgentCapabilities_AcceptsPackages |
+			protobufs.AgentCapabilities_AgentCapabilities_ReportsPackageStatuses |
+			protobufs.AgentCapabilities_AgentCapabilities_VerifiesPackageSignatures
+		require.NoError(t, common.ClientSyncedState.SetCapabilities(&caps))
+		// PackagesStateProvider must be non-nil for AcceptsPackages capability.
+		common.PackagesStateProvider = NewInMemPackagesStore()
+		err := common.validateCapabilities(caps)
+		assert.ErrorIs(t, err, ErrSignatureVerifierRequired)
+	})
 }

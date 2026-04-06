@@ -179,8 +179,10 @@ func TestPackageSyncer_SignatureIgnoredWithoutCapability(t *testing.T) {
 }
 
 func TestPackageSyncer_NilVerifierWithCapabilityFails(t *testing.T) {
-	// validateCapabilities in clientcommon.go should prevent reaching this state at
-	// startup, but test the syncer's hasCapability guard directly.
+	// When VerifiesPackageSignatures is declared but signatureVerifier is nil,
+	// the syncer must hard-reject the install rather than silently skipping
+	// verification. validateCapabilities prevents this at Start() time; this
+	// test confirms the syncer also enforces the invariant as a safety net.
 	content := []byte("pkg content")
 
 	caps := protobufs.AgentCapabilities_AgentCapabilities_AcceptsPackages |
@@ -188,11 +190,8 @@ func TestPackageSyncer_NilVerifierWithCapabilityFails(t *testing.T) {
 		protobufs.AgentCapabilities_AgentCapabilities_VerifiesPackageSignatures |
 		protobufs.AgentCapabilities_AgentCapabilities_ReportsStatus
 
-	// Pass nil verifier with the capability set — the syncer should treat it as if
-	// no verification is available and skip it (same as no capability).
-	// This is the safe fallback; enforcement happens in clientcommon.go.
 	status, _ := runSyncerWithSignature(t, content, nil, nil, caps)
 	require.NotNil(t, status)
-	// With nil verifier, needsSigVerify is false, so install succeeds.
-	assert.Equal(t, protobufs.PackageStatusEnum_PackageStatusEnum_Installed, status.Status)
+	assert.Equal(t, protobufs.PackageStatusEnum_PackageStatusEnum_InstallFailed, status.Status)
+	assert.Contains(t, status.ErrorMessage, "SignatureVerifier is not configured")
 }

@@ -248,3 +248,35 @@ func TestVerifyFile_MissingSignature(t *testing.T) {
 	err := fx.verifier.VerifyFile(file, []byte("content"))
 	assert.ErrorIs(t, err, signing.ErrMissingSignature)
 }
+
+func TestVerifyRemoteConfig_OversizedCertChain(t *testing.T) {
+	// parsePEMCerts must reject bundles with more than maxCertChainLen (10)
+	// certificates without parsing them all — this is the DoS protection boundary.
+	caKey, caCert, caCertPEM, err := signing.GenerateECDSACA()
+	require.NoError(t, err)
+
+	// Build a valid signed config using the real leaf cert.
+	leafTLS, leafChainPEM, err := signing.GenerateECDSALeafCert(caCert, caKey)
+	require.NoError(t, err)
+	cs, err := signing.NewConfigSigner(leafTLS, leafChainPEM)
+	require.NoError(t, err)
+
+	config := sampleConfig()
+	require.NoError(t, cs.SignConfig(config))
+
+	// Replace SigningCertChain with a bundle of 11 certificates.
+	var bigBundle []byte
+	bigBundle = append(bigBundle, caCertPEM...) // leaf (1)
+	for i := 0; i < 10; i++ {                  // 10 more = 11 total
+		bigBundle = append(bigBundle, caCertPEM...)
+	}
+	config.SigningCertChain = bigBundle
+
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(caCertPEM)
+	verifier := signing.NewX509SignatureVerifier(pool)
+
+	err = verifier.VerifyRemoteConfig(config)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "maximum allowed length")
+}

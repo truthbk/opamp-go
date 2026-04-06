@@ -99,6 +99,19 @@ verified over the full byte content of the temp file before handing it to
 and `InstallFailed` is reported. This avoids buffering arbitrarily large binaries in
 heap memory while still allowing byte-accurate signature verification.
 
+### Resource limits on server-supplied data
+
+Two size limits protect the agent from a malicious or buggy server:
+
+- **Package downloads** (`packagessyncer.go`): capped at `maxPackageBodyBytes` (512 MiB)
+  via `io.LimitReader`. Downloads that exceed the limit are rejected before the content
+  reaches the signature verifier.
+- **Control-plane responses** (`httpsender.go`): `receiveResponse` caps the HTTP
+  response body at `maxControlPlaneBodyBytes` (16 MiB) via `io.LimitReader`. This
+  prevents a malicious server from exhausting agent heap memory by sending oversized
+  `ServerToAgent` protobuf messages containing large `Signature` or `SigningCertChain`
+  fields.
+
 ---
 
 ## Protocol Changes
@@ -265,7 +278,9 @@ The signed bytes have the following format:
 - **4-byte length prefix** — a big-endian `uint32` length of `configBytes` prefixed
   before the config bytes. This unambiguously delimits the two fields and prevents a
   length-confusion attack where distinct `(Config, Hash)` pairs could otherwise produce
-  identical byte strings.
+  identical byte strings. `configSignedPayload` guards against `uint32` overflow
+  (`len(configBytes) > math.MaxUint32`) and returns an error rather than silently
+  truncating the prefix.
 
 ### `signing/signer.go` — Signature creation (server side)
 
@@ -385,7 +400,8 @@ New flow:
     → io.TeeReader (progress)
     → os.CreateTemp (temp file)
   if written > 512 MiB: return error
-  if signatureVerifier != nil && VerifiesPackageSignatures:
+  if VerifiesPackageSignatures capability set:
+      if signatureVerifier == nil: return hard error   ← programming error, never silent skip
       content = os.ReadFile(tmpPath)
       err = signatureVerifier.VerifyFile(file, content)
       if err: delete tmpPath, return wrapped error
@@ -397,27 +413,29 @@ New flow:
 The `maxPackageBodyBytes` constant (512 MiB) caps the download body. Reading one byte
 beyond the limit is used to detect overflow: if `io.Copy` writes more than
 `maxPackageBodyBytes` bytes, `downloadFile` returns an error and the temp file is
-discarded. This prevents a malicious server from exhausting disk space or causing an
-unbounded heap allocation in the subsequent `os.ReadFile` call.
+discarded.
+
+The signature verification guard is keyed solely on the capability bit. If
+`signatureVerifier` is nil while `VerifiesPackageSignatures` is set — a state that
+`validateCapabilities` prevents at `Start()` time — `downloadFile` returns a hard error
+(`"SignatureVerifier is not configured"`) rather than silently skipping verification.
+This ensures there is no latent path by which a programming error could bypass the
+security check.
 
 The legacy `file.Signature` bytes continue to be passed to `UpdateContent` unchanged,
 preserving the existing interface contract for agent implementations that perform their
 own secondary verification.
 
-The `needsSigVerify` guard checks both that `signatureVerifier != nil` and that the
-`VerifiesPackageSignatures` capability bit is set. A nil verifier with the capability
-set is treated as "no verification" — enforcement of the nil check happens earlier in
-`validateCapabilities`. This avoids a nil-pointer panic if the two guards somehow get
-out of sync during future refactoring.
+### Transport-layer threading and limits
 
-### Transport-layer threading
-
-Both transport implementations pass the verifier through the call chain:
+Both transport implementations pass the verifier through the call chain and enforce
+body size limits on received data:
 
 | Call site | Change |
 |---|---|
 | `client/internal/wsreceiver.go: NewWSReceiver` | Added `signatureVerifier signing.SignatureVerifier` parameter |
 | `client/internal/httpsender.go: HTTPSender.Run` | Added `signatureVerifier signing.SignatureVerifier` parameter |
+| `client/internal/httpsender.go: receiveResponse` | `io.LimitReader(resp.Body, maxControlPlaneBodyBytes+1)` guards against oversized ServerToAgent responses |
 | `client/wsclient.go` | Passes `c.common.SignatureVerifier` to `NewWSReceiver` |
 | `client/httpclient.go` | Passes `c.common.SignatureVerifier` to `sender.Run` |
 
@@ -435,7 +453,7 @@ All tests are in three locations:
 - `client/internal/receivedprocessor_signing_test.go` — unit tests for the
   remote-config signature enforcement in `receivedprocessor`.
 
-### `signing/verifier_test.go` — 11 tests
+### `signing/verifier_test.go` — 12 tests
 
 These tests validate every branch of the `X509SignatureVerifier` implementation.
 
@@ -448,6 +466,7 @@ These tests validate every branch of the `X509SignatureVerifier` implementation.
 | `TestVerifyRemoteConfig_UnknownCA` | A cert from a CA not in the trust pool is rejected. | The trust anchor pool is the entire basis of the PKI model. A bypass here would allow any cert to sign. |
 | `TestVerifyRemoteConfig_WrongEKU` | A cert with `ExtKeyUsageServerAuth` but not `ExtKeyUsageCodeSigning` is rejected. | Extended Key Usage constraints limit what a certificate can be used for. Ignoring EKU would allow an attacker to repurpose a server TLS certificate for code signing. |
 | `TestVerifyRemoteConfig_MissingSignature` | A config with no `Signature` field returns `ErrMissingSignature`. | Hard-reject semantics require a specific sentinel error that the SDK can detect and act on. Tests that `errors.Is` works correctly so callers can distinguish "unsigned" from "bad signature". |
+| `TestVerifyRemoteConfig_OversizedCertChain` | A PEM bundle with 11 certificates returns an error containing "maximum allowed length". | Verifies the `maxCertChainLen` DoS protection boundary. Without this test a regression that removed the limit would not be detected. |
 | `TestVerifyFile_Valid` | A correctly signed file verifies without error. | Baseline correctness for the file signing path, which uses a different payload (raw bytes, not proto). |
 | `TestVerifyFile_TamperedContent` | Changing file bytes after signing causes a verification error. | Confirms the signature binds to the content, not just the metadata. An attacker who substitutes a different binary after the server signs should be detected. |
 | `TestVerifyFile_TamperedSig` | Corrupting the DER signature on a file causes an error. | Parallel to the config tampered-sig test; ensures both code paths have byte-level integrity checking. |
@@ -471,7 +490,7 @@ These tests validate the server-side signing helpers.
 | `TestConfigSigner_WrongCA` | Signing with CA-A and verifying with CA-B trust pool fails. | Confirms the trust anchor pool is enforced end-to-end, not just in the unit test for `verifyCertChain`. |
 | `TestConfigSigner_RejectsRSAKey` | Passing a `tls.Certificate` with an RSA private key to `NewConfigSigner` or `NewFileSigner` returns an error containing "ECDSA". | Directly tests the key-type enforcement path. A regression that silently accepted a non-ECDSA key would produce a panic or wrong signature at signing time. |
 
-### `client/internal/receivedprocessor_signing_test.go` — 5 tests
+### `client/internal/receivedprocessor_signing_test.go` — 7 tests
 
 These tests exercise `verifyRemoteConfigSignature` and `validateCapabilities` through
 `ProcessReceivedMessage` and `ClientCommon` directly, without a live transport.
@@ -482,7 +501,9 @@ These tests exercise `verifyRemoteConfigSignature` and `validateCapabilities` th
 | `TestReceivedProcessor_InvalidSignatureRejected` | Invalid signature (wrong CA) → `OnMessage` not called, `RemoteConfigStatus = FAILED` sent, `LastRemoteConfigHash` equals the rejected config's hash. | Validates hard-reject semantics and the corrected hash field (using the rejected hash, not the previously applied hash, prevents a server resend loop). |
 | `TestReceivedProcessor_MissingSignatureRejected` | Unsigned config + capability → hard-rejected with `FAILED` status. | Ensures agents that declare the verification capability never silently apply unsigned configs. |
 | `TestReceivedProcessor_SignatureIgnoredWithoutCapability` | `VerifiesRemoteConfigSignature` not declared → config delivered regardless of signature validity. | Backwards compatibility: capability-gating must be strictly respected. |
-| `TestClientCommon_ErrSignatureVerifierRequired` | `validateCapabilities` with a signing capability but nil verifier returns `ErrSignatureVerifierRequired`. | Tests the `PrepareStart`-time enforcement that prevents mis-configuration from reaching the network. |
+| `TestReceivedProcessor_NilVerifierWithCapabilityFails` | `VerifiesRemoteConfigSignature` set + nil verifier → hard-rejected with `FAILED` status, not silently skipped. | Confirms the processor's own nil-verifier guard produces the correct outcome; `validateCapabilities` prevents this state at startup but the processor must not silently bypass security if somehow reached. |
+| `TestClientCommon_ErrSignatureVerifierRequired/VerifiesRemoteConfigSignature` | `validateCapabilities` with `VerifiesRemoteConfigSignature` + nil verifier returns `ErrSignatureVerifierRequired`. | Tests the `PrepareStart`-time enforcement that prevents mis-configuration from reaching the network. |
+| `TestClientCommon_ErrSignatureVerifierRequired/VerifiesPackageSignatures` | `validateCapabilities` with `VerifiesPackageSignatures` + nil verifier returns `ErrSignatureVerifierRequired`. | Covers the second half of the `||` in `validateCapabilities` — both signing capability bits must be individually tested. |
 
 ### `client/internal/packagessyncer_signing_test.go` — 5 tests
 
@@ -497,7 +518,7 @@ package syncer test file.
 | `TestPackageSyncer_InvalidSignatureRejected` | Capability set + wrong-CA verifier + signed file → `InstallFailed` with "signature verification failed" in the error message. | Validates that a man-in-the-middle who intercepts the download URL or rotates the file content is detected. Uses a separate CA (not the one that signed) to simulate an unknown signer. |
 | `TestPackageSyncer_MissingSignatureRejected` | Capability set + verifier + no signature on file → `InstallFailed`. | Hard-reject semantics: an agent that requires signatures must never install an unsigned package, even from a server that simply forgot to sign. |
 | `TestPackageSyncer_SignatureIgnoredWithoutCapability` | No `VerifiesPackageSignatures` capability, wrong-CA verifier, signed file → `Installed`. | Backwards compatibility: an agent that does not declare the capability must not be affected by the presence of signing infrastructure. Old agents connecting to a signing-enabled server must work identically to before. |
-| `TestPackageSyncer_NilVerifierWithCapabilityFails` | Capability set but `signatureVerifier == nil` → package installs (verification skipped). | Documents the nil-safe behaviour of the syncer's `needsSigVerify` guard. The SDK's earlier `validateCapabilities` check is the primary enforcement point; the syncer's guard is a safety net against future refactoring. This test confirms the safe fallback. |
+| `TestPackageSyncer_NilVerifierWithCapabilityFails` | Capability set but `signatureVerifier == nil` → `InstallFailed` with "SignatureVerifier is not configured". | Verifies the hard-error behavior of the syncer's nil-verifier guard. The capability bit alone is sufficient to require verification; a nil verifier must never silently skip it. |
 
 ---
 
@@ -530,7 +551,7 @@ their test behaviour entirely unchanged.
 | `signing/certs.go` | New | ECDSA P-256 CA and leaf cert generation helpers |
 | `signing/verifier.go` | New | `SignatureVerifier` interface + `X509SignatureVerifier` implementation |
 | `signing/signer.go` | New | `ConfigSigner` and `FileSigner` for server-side use |
-| `signing/verifier_test.go` | New | 11 unit tests for `X509SignatureVerifier` |
+| `signing/verifier_test.go` | New | 12 unit tests for `X509SignatureVerifier` (including `maxCertChainLen` enforcement) |
 | `signing/signer_test.go` | New | 4 unit tests for `ConfigSigner` and `FileSigner` (including RSA key rejection) |
 | `client/types/startsettings.go` | Modified | Added `SignatureVerifier signing.SignatureVerifier` field |
 | `client/internal/clientcommon.go` | Modified | `ErrSignatureVerifierRequired`, `SignatureVerifier` field, `validateCapabilities` guard, `PrepareStart` wiring |
@@ -541,7 +562,7 @@ their test behaviour entirely unchanged.
 | `client/wsclient.go` | Modified | Passes `c.common.SignatureVerifier` to `NewWSReceiver` |
 | `client/httpclient.go` | Modified | Passes `c.common.SignatureVerifier` to `sender.Run` |
 | `client/internal/packagessyncer_signing_test.go` | New | 5 integration tests for signing enforcement in the package syncer |
-| `client/internal/receivedprocessor_signing_test.go` | New | 5 unit tests for remote-config signing enforcement in `receivedprocessor` |
+| `client/internal/receivedprocessor_signing_test.go` | New | 7 unit tests for remote-config signing enforcement in `receivedprocessor` |
 | `client/internal/packagessyncer_test.go` | Modified | Updated `NewPackagesSyncer` call sites with `nil` verifier |
 | `client/internal/wsreceiver_test.go` | Modified | Updated `NewWSReceiver` call sites with `nil` verifier |
 | `client/internal/httpsender_test.go` | Modified | Updated `newReceivedProcessor` call sites with `nil` verifier |

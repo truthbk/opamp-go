@@ -368,10 +368,14 @@ func (s *packagesSyncer) downloadFile(ctx context.Context, pkgName string, file 
 		return fmt.Errorf("cannot close temp file for package %s: %v", pkgName, err)
 	}
 
-	// Verify X.509 signature when the capability is declared and a verifier is set.
-	needsSigVerify := s.signatureVerifier != nil &&
-		s.clientSyncedState.Capabilities()&protobufs.AgentCapabilities_AgentCapabilities_VerifiesPackageSignatures != 0
-	if needsSigVerify {
+	// Verify X.509 signature when the capability is declared.
+	if s.clientSyncedState.Capabilities()&protobufs.AgentCapabilities_AgentCapabilities_VerifiesPackageSignatures != 0 {
+		if s.signatureVerifier == nil {
+			// validateCapabilities prevents this at Start() time, but guard here
+			// too so a programming error produces a clear failure rather than a
+			// silent security bypass.
+			return fmt.Errorf("signature verification required for package %s but SignatureVerifier is not configured", pkgName)
+		}
 		content, err := os.ReadFile(tmpPath)
 		if err != nil {
 			return fmt.Errorf("cannot read temp file for signature verification of package %s: %v", pkgName, err)
