@@ -45,6 +45,7 @@ func TestNewPackagesSyncer(t *testing.T) {
 				&sync.Mutex{},
 				time.Second,
 				tt.clientFactory,
+				nil,
 			)
 			if tt.err != "" {
 				assert.EqualError(t, err, tt.err)
@@ -143,6 +144,7 @@ func TestPackageSyncerSync(t *testing.T) {
 				func(context.Context, *protobufs.DownloadableFile) (*http.Client, error) {
 					return &http.Client{}, nil
 				},
+				nil,
 			)
 			require.NoError(t, err)
 

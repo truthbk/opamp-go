@@ -22,6 +22,7 @@ import (
 	"github.com/open-telemetry/opamp-go/client/types"
 	"github.com/open-telemetry/opamp-go/internal"
 	"github.com/open-telemetry/opamp-go/protobufs"
+	"github.com/open-telemetry/opamp-go/signing"
 )
 
 const (
@@ -129,10 +130,11 @@ func (h *HTTPSender) Run(
 	packagesStateProvider types.PackagesStateProvider,
 	packageSyncMutex *sync.Mutex,
 	reporterInterval time.Duration,
+	signatureVerifier signing.SignatureVerifier,
 ) {
 	h.url = url
 	h.callbacks = callbacks
-	h.receiveProcessor = newReceivedProcessor(h.logger, callbacks, h, clientSyncedState, packagesStateProvider, packageSyncMutex, reporterInterval)
+	h.receiveProcessor = newReceivedProcessor(h.logger, callbacks, h, clientSyncedState, packagesStateProvider, packageSyncMutex, reporterInterval, signatureVerifier)
 
 	// we need to detect if the redirect was ever set, if not, we want default behaviour
 	if callbacks.CheckRedirect != nil {

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/open-telemetry/opamp-go/protobufs"
+	"github.com/open-telemetry/opamp-go/signing"
 )
 
 // StartSettings defines the parameters for starting the OpAMP Client.
@@ -77,4 +78,15 @@ type StartSettings struct {
 	// If nil, the default reporter interval (10s) will be used.
 	// If specified a minimum value of 1s will be enforced.
 	DownloadReporterInterval *time.Duration
+
+	// SignatureVerifier is used to verify X.509 signatures on remote configurations
+	// and package files when the corresponding AgentCapabilities are set.
+	//
+	// Required when AgentCapabilities_VerifiesRemoteConfigSignature or
+	// AgentCapabilities_VerifiesPackageSignatures are declared via SetCapabilities.
+	// If nil and either verification capability is set, Start() will return
+	// ErrSignatureVerifierRequired.
+	//
+	// See the signing package for a ready-to-use X509SignatureVerifier implementation.
+	SignatureVerifier signing.SignatureVerifier
 }

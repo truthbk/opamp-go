@@ -11,6 +11,7 @@ import (
 
 	"github.com/open-telemetry/opamp-go/client/types"
 	"github.com/open-telemetry/opamp-go/protobufs"
+	"github.com/open-telemetry/opamp-go/signing"
 )
 
 var (
@@ -23,6 +24,9 @@ var (
 	ErrCapabilitiesNotSet           = errors.New("Capabilities is not set")
 	ErrAcceptsPackagesNotSet        = errors.New("AcceptsPackages and ReportsPackageStatuses must be set")
 	ErrAvailableComponentsMissing   = errors.New("AvailableComponents is nil")
+	// ErrSignatureVerifierRequired is returned when a signing capability is declared but
+	// no SignatureVerifier is provided in StartSettings.
+	ErrSignatureVerifierRequired = errors.New("SignatureVerifier must be set when VerifiesRemoteConfigSignature or VerifiesPackageSignatures capability is declared")
 
 	errAlreadyStarted               = errors.New("already started")
 	errCannotStopNotStarted         = errors.New("cannot stop because not started")
@@ -43,6 +47,10 @@ type ClientCommon struct {
 
 	// PackageSyncMutex makes sure only one package syncing operation happens at a time.
 	PackageSyncMutex sync.Mutex
+
+	// SignatureVerifier verifies X.509 signatures on remote configs and package files.
+	// Set from StartSettings.SignatureVerifier during PrepareStart.
+	SignatureVerifier signing.SignatureVerifier
 
 	// The transport-specific sender.
 	sender Sender
@@ -92,6 +100,12 @@ func (c *ClientCommon) validateCapabilities(capabilities protobufs.AgentCapabili
 			return ErrPackagesStateProviderNotSet
 		}
 	}
+	// X.509 signing: a SignatureVerifier must be provided when verification capabilities are declared.
+	needsVerifier := capabilities&protobufs.AgentCapabilities_AgentCapabilities_VerifiesRemoteConfigSignature != 0 ||
+		capabilities&protobufs.AgentCapabilities_AgentCapabilities_VerifiesPackageSignatures != 0
+	if needsVerifier && c.SignatureVerifier == nil {
+		return ErrSignatureVerifierRequired
+	}
 	return nil
 }
 
@@ -130,6 +144,8 @@ func (c *ClientCommon) PrepareStart(
 
 	// Prepare package statuses.
 	c.PackagesStateProvider = settings.PackagesStateProvider
+	// Store signature verifier before capability validation so validateCapabilities can check it.
+	c.SignatureVerifier = settings.SignatureVerifier
 	if err := c.validateCapabilities(c.ClientSyncedState.Capabilities()); err != nil {
 		return err
 	}

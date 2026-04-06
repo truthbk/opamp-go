@@ -9,6 +9,7 @@ import (
 
 	"github.com/open-telemetry/opamp-go/client/types"
 	"github.com/open-telemetry/opamp-go/protobufs"
+	"github.com/open-telemetry/opamp-go/signing"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -34,6 +35,10 @@ type receivedProcessor struct {
 	// Download reporter interval value
 	// a negative number indicates that the default should be used instead.
 	downloadReporterInt time.Duration
+
+	// signatureVerifier verifies X.509 signatures on remote configs and package files.
+	// May be nil if signature verification is not configured.
+	signatureVerifier signing.SignatureVerifier
 }
 
 func newReceivedProcessor(
@@ -44,6 +49,7 @@ func newReceivedProcessor(
 	packagesStateProvider types.PackagesStateProvider,
 	packageSyncMutex *sync.Mutex,
 	downloadReporterInt time.Duration,
+	signatureVerifier signing.SignatureVerifier,
 ) receivedProcessor {
 	return receivedProcessor{
 		logger:                logger,
@@ -53,6 +59,7 @@ func newReceivedProcessor(
 		packagesStateProvider: packagesStateProvider,
 		packageSyncMutex:      packageSyncMutex,
 		downloadReporterInt:   downloadReporterInt,
+		signatureVerifier:     signatureVerifier,
 	}
 }
 
@@ -82,7 +89,16 @@ func (r *receivedProcessor) ProcessReceivedMessage(ctx context.Context, msg *pro
 
 	if msg.RemoteConfig != nil {
 		if r.hasCapability(protobufs.AgentCapabilities_AgentCapabilities_AcceptsRemoteConfig) {
-			msgData.RemoteConfig = msg.RemoteConfig
+			if r.hasCapability(protobufs.AgentCapabilities_AgentCapabilities_VerifiesRemoteConfigSignature) {
+				if err := r.verifyRemoteConfigSignature(ctx, msg.RemoteConfig); err != nil {
+					// Hard reject: do not deliver to OnMessage.
+					r.logger.Errorf(ctx, "Remote config signature verification failed: %v", err)
+				} else {
+					msgData.RemoteConfig = msg.RemoteConfig
+				}
+			} else {
+				msgData.RemoteConfig = msg.RemoteConfig
+			}
 		} else {
 			r.logger.Debugf(ctx, "Ignoring RemoteConfig, agent does not have AcceptsRemoteConfig capability")
 		}
@@ -159,6 +175,7 @@ func (r *receivedProcessor) ProcessReceivedMessage(ctx context.Context, msg *pro
 				r.packageSyncMutex,
 				r.downloadReporterInt,
 				r.callbacks.DownloadHTTPClient,
+				r.signatureVerifier,
 			)
 			if err != nil {
 				r.logger.Errorf(ctx, "failed to create package syncer: %v", err)
@@ -401,6 +418,38 @@ func (r *receivedProcessor) rcvCommand(ctx context.Context, command *protobufs.S
 	if command != nil {
 		r.callbacks.OnCommand(ctx, command)
 	}
+}
+
+// verifyRemoteConfigSignature verifies the X.509 signature on a remote config and
+// reports the appropriate RemoteConfigStatus on failure so the server is informed.
+// Returns nil on success, or an error describing the failure.
+func (r *receivedProcessor) verifyRemoteConfigSignature(ctx context.Context, config *protobufs.AgentRemoteConfig) error {
+	var verifyErr error
+	if r.signatureVerifier == nil {
+		verifyErr = fmt.Errorf("SignatureVerifier is not configured")
+	} else {
+		verifyErr = r.signatureVerifier.VerifyRemoteConfig(config)
+	}
+	if verifyErr == nil {
+		return nil
+	}
+
+	// Report failure to the server. Use the rejected config's own hash so the
+	// server knows which version was rejected, not the previously applied hash.
+	status := &protobufs.RemoteConfigStatus{
+		LastRemoteConfigHash: config.GetConfigHash(),
+		Status:               protobufs.RemoteConfigStatuses_RemoteConfigStatuses_FAILED,
+		ErrorMessage:         fmt.Sprintf("signature verification failed: %v", verifyErr),
+	}
+	if err := r.clientSyncedState.SetRemoteConfigStatus(status); err != nil {
+		r.logger.Errorf(ctx, "Cannot persist RemoteConfigStatus after signature failure: %v", err)
+	}
+	r.sender.NextMessage().Update(func(msg *protobufs.AgentToServer) {
+		msg.RemoteConfigStatus = status
+	})
+	r.sender.ScheduleSend()
+
+	return verifyErr
 }
 
 // updateStoredConnectionSettingsStatus returns a bool of if status should replace oldStatus.

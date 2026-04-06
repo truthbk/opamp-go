@@ -10,6 +10,7 @@ import (
 	"github.com/open-telemetry/opamp-go/client/types"
 	"github.com/open-telemetry/opamp-go/internal"
 	"github.com/open-telemetry/opamp-go/protobufs"
+	"github.com/open-telemetry/opamp-go/signing"
 )
 
 // wsReceiver implements the WebSocket client's receiving portion of OpAMP protocol.
@@ -35,13 +36,14 @@ func NewWSReceiver(
 	packagesStateProvider types.PackagesStateProvider,
 	packageSyncMutex *sync.Mutex,
 	reporterInterval time.Duration,
+	signatureVerifier signing.SignatureVerifier,
 ) *wsReceiver {
 	w := &wsReceiver{
 		conn:      conn,
 		logger:    logger,
 		sender:    sender,
 		callbacks: callbacks,
-		processor: newReceivedProcessor(logger, callbacks, sender, clientSyncedState, packagesStateProvider, packageSyncMutex, reporterInterval),
+		processor: newReceivedProcessor(logger, callbacks, sender, clientSyncedState, packagesStateProvider, packageSyncMutex, reporterInterval, signatureVerifier),
 		stopped:   make(chan struct{}),
 	}
 

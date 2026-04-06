@@ -169,6 +169,16 @@ const (
 	// The Server can accept ConnectionSettingsRequest and respond with an offer.
 	// Status: [Development]
 	ServerCapabilities_ServerCapabilities_AcceptsConnectionSettingsRequest ServerCapabilities = 64
+	// The Server signs remote configurations using ECDSA P-256 + SHA-256.
+	// The signature is placed in AgentRemoteConfig.signature and the signing
+	// certificate chain in AgentRemoteConfig.signing_cert_chain.
+	// Status: [Development]
+	ServerCapabilities_ServerCapabilities_SignsRemoteConfig ServerCapabilities = 128
+	// The Server signs downloadable package files using ECDSA P-256 + SHA-256.
+	// The signature is placed in DownloadableFile.signature and the signing
+	// certificate chain in DownloadableFile.signing_cert_chain.
+	// Status: [Development]
+	ServerCapabilities_ServerCapabilities_SignsPackages ServerCapabilities = 256
 )
 
 // Enum value maps for ServerCapabilities.
@@ -181,7 +191,9 @@ var (
 		8:  "ServerCapabilities_OffersPackages",
 		16: "ServerCapabilities_AcceptsPackagesStatus",
 		32: "ServerCapabilities_OffersConnectionSettings",
-		64: "ServerCapabilities_AcceptsConnectionSettingsRequest",
+		64:  "ServerCapabilities_AcceptsConnectionSettingsRequest",
+		128: "ServerCapabilities_SignsRemoteConfig",
+		256: "ServerCapabilities_SignsPackages",
 	}
 	ServerCapabilities_value = map[string]int32{
 		"ServerCapabilities_Unspecified":                      0,
@@ -192,6 +204,8 @@ var (
 		"ServerCapabilities_AcceptsPackagesStatus":            16,
 		"ServerCapabilities_OffersConnectionSettings":         32,
 		"ServerCapabilities_AcceptsConnectionSettingsRequest": 64,
+		"ServerCapabilities_SignsRemoteConfig":                128,
+		"ServerCapabilities_SignsPackages":                    256,
 	}
 )
 
@@ -430,7 +444,19 @@ const (
 	AgentCapabilities_AgentCapabilities_ReportsAvailableComponents AgentCapabilities = 16384
 	// The agent will report ConnectionSettingsOffers status via AgentToServer.connection_settings_status field.
 	// Status: [Development]
-	AgentCapabilities_AgentCapabilities_ReportsConnectionSettingsStatus AgentCapabilities = 32768 // Add new capabilities here, continuing with the least significant unused bit.
+	AgentCapabilities_AgentCapabilities_ReportsConnectionSettingsStatus AgentCapabilities = 32768
+	// The Agent will verify X.509 signatures on received remote configurations.
+	// If set, remote configs that are not signed or whose signature fails
+	// verification are hard-rejected: the Agent sets
+	// RemoteConfigStatus.status = FAILED and does not apply the config.
+	// Status: [Development]
+	AgentCapabilities_AgentCapabilities_VerifiesRemoteConfigSignature AgentCapabilities = 65536
+	// The Agent will verify X.509 signatures on received package files.
+	// If set, package files that are not signed or whose signature fails
+	// verification are hard-rejected: the Agent sets
+	// PackageStatus.status = InstallFailed and does not install the package.
+	// Status: [Development]
+	AgentCapabilities_AgentCapabilities_VerifiesPackageSignatures AgentCapabilities = 131072 // Add new capabilities here, continuing with the least significant unused bit.
 )
 
 // Enum value maps for AgentCapabilities.
@@ -452,7 +478,9 @@ var (
 		4096:  "AgentCapabilities_ReportsRemoteConfig",
 		8192:  "AgentCapabilities_ReportsHeartbeat",
 		16384: "AgentCapabilities_ReportsAvailableComponents",
-		32768: "AgentCapabilities_ReportsConnectionSettingsStatus",
+		32768:  "AgentCapabilities_ReportsConnectionSettingsStatus",
+		65536:  "AgentCapabilities_VerifiesRemoteConfigSignature",
+		131072: "AgentCapabilities_VerifiesPackageSignatures",
 	}
 	AgentCapabilities_value = map[string]int32{
 		"AgentCapabilities_Unspecified":                     0,
@@ -472,6 +500,8 @@ var (
 		"AgentCapabilities_ReportsHeartbeat":                8192,
 		"AgentCapabilities_ReportsAvailableComponents":      16384,
 		"AgentCapabilities_ReportsConnectionSettingsStatus": 32768,
+		"AgentCapabilities_VerifiesRemoteConfigSignature":   65536,
+		"AgentCapabilities_VerifiesPackageSignatures":       131072,
 	}
 )
 
@@ -2377,6 +2407,11 @@ type DownloadableFile struct {
 	// key="Authorization", Value="Basic YWxhZGRpbjpvcGVuc2VzYW1l".
 	// Status: [Development]
 	Headers *Headers `protobuf:"bytes,4,opt,name=headers,proto3" json:"headers,omitempty"`
+	// PEM bundle of the signing certificate chain used to produce Signature.
+	// Leaf certificate first, then intermediates (root not required).
+	// Present when Signature is present and the server has the SignsPackages capability.
+	// Status: [Development]
+	SigningCertChain []byte `protobuf:"bytes,5,opt,name=signing_cert_chain,json=signingCertChain,proto3" json:"signing_cert_chain,omitempty"`
 }
 
 func (x *DownloadableFile) Reset() {
@@ -2435,6 +2470,13 @@ func (x *DownloadableFile) GetSignature() []byte {
 func (x *DownloadableFile) GetHeaders() *Headers {
 	if x != nil {
 		return x.Headers
+	}
+	return nil
+}
+
+func (x *DownloadableFile) GetSigningCertChain() []byte {
+	if x != nil {
+		return x.SigningCertChain
 	}
 	return nil
 }
@@ -3345,6 +3387,18 @@ type AgentRemoteConfig struct {
 	// Management Server must choose a hashing function that guarantees lack of hash
 	// collisions in practice.
 	ConfigHash []byte `protobuf:"bytes,2,opt,name=config_hash,json=configHash,proto3" json:"config_hash,omitempty"`
+	// Optional DER-encoded ECDSA P-256 signature over SHA-256 of the deterministic
+	// proto serialisation of `config` concatenated with `config_hash`.
+	// Present when the Server has the SignsRemoteConfig capability.
+	// Agents with VerifiesRemoteConfigSignature MUST verify this and reject the
+	// config if verification fails.
+	// Status: [Development]
+	Signature []byte `protobuf:"bytes,3,opt,name=signature,proto3" json:"signature,omitempty"`
+	// PEM bundle of the signing certificate chain used to produce Signature.
+	// Leaf certificate first, then intermediates (root not required).
+	// Present when Signature is present.
+	// Status: [Development]
+	SigningCertChain []byte `protobuf:"bytes,4,opt,name=signing_cert_chain,json=signingCertChain,proto3" json:"signing_cert_chain,omitempty"`
 }
 
 func (x *AgentRemoteConfig) Reset() {
@@ -3389,6 +3443,20 @@ func (x *AgentRemoteConfig) GetConfig() *AgentConfigMap {
 func (x *AgentRemoteConfig) GetConfigHash() []byte {
 	if x != nil {
 		return x.ConfigHash
+	}
+	return nil
+}
+
+func (x *AgentRemoteConfig) GetSignature() []byte {
+	if x != nil {
+		return x.Signature
+	}
+	return nil
+}
+
+func (x *AgentRemoteConfig) GetSigningCertChain() []byte {
+	if x != nil {
+		return x.SigningCertChain
 	}
 	return nil
 }

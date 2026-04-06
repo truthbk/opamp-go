@@ -6,13 +6,20 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/open-telemetry/opamp-go/client/types"
 	"github.com/open-telemetry/opamp-go/protobufs"
+	"github.com/open-telemetry/opamp-go/signing"
 )
+
+// maxPackageBodyBytes is the maximum number of bytes accepted from a package
+// download response body. This prevents a malicious server from exhausting
+// disk space or heap memory during download.
+const maxPackageBodyBytes int64 = 512 * 1024 * 1024 // 512 MiB
 
 // packagesSyncer performs the package syncing process.
 type packagesSyncer struct {
@@ -27,6 +34,10 @@ type packagesSyncer struct {
 	statuses          *protobufs.PackageStatuses
 	mux               *sync.Mutex
 	doneCh            chan struct{}
+
+	// signatureVerifier verifies X.509 signatures on downloaded package files.
+	// May be nil if the VerifiesPackageSignatures capability is not set.
+	signatureVerifier signing.SignatureVerifier
 }
 
 // NewPackagesSyncer creates a new packages syncer.
@@ -39,6 +50,7 @@ func NewPackagesSyncer(
 	mux *sync.Mutex,
 	reporterInterval time.Duration,
 	httpClientFactory func(context.Context, *protobufs.DownloadableFile) (*http.Client, error),
+	signatureVerifier signing.SignatureVerifier,
 ) (*packagesSyncer, error) {
 	if httpClientFactory == nil {
 		return nil, fmt.Errorf("httpClientFactory must not be nil")
@@ -53,6 +65,7 @@ func NewPackagesSyncer(
 		mux:               mux,
 		reporterInterval:  reporterInterval,
 		httpClientFactory: httpClientFactory,
+		signatureVerifier: signatureVerifier,
 	}, nil
 }
 
@@ -281,7 +294,8 @@ func (s *packagesSyncer) shouldDownloadFile(ctx context.Context,
 	return false, nil
 }
 
-// downloadFile downloads the file from the server.
+// downloadFile downloads the file from the server, optionally verifying the X.509
+// signature if the VerifiesPackageSignatures capability is set.
 func (s *packagesSyncer) downloadFile(ctx context.Context, pkgName string, file *protobufs.DownloadableFile) error {
 	status := s.statuses.Packages[pkgName]
 	status.Status = protobufs.PackageStatusEnum_PackageStatusEnum_Downloading
@@ -328,8 +342,53 @@ func (s *packagesSyncer) downloadFile(ctx context.Context, pkgName string, file 
 	detailsReporter.report(ctx, s.updateDownloadDetails(pkgName))
 	defer detailsReporter.stop()
 
-	tr := io.TeeReader(resp.Body, detailsReporter)
-	err = s.localState.UpdateContent(ctx, pkgName, tr, file.ContentHash, file.Signature)
+	// Write to a temp file while tracking progress. This lets us verify the
+	// X.509 signature over the full content before writing to local state.
+	tmpFile, err := os.CreateTemp("", "opamp-pkg-*")
+	if err != nil {
+		return fmt.Errorf("cannot create temp file for package %s: %v", pkgName, err)
+	}
+	tmpPath := tmpFile.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	// Limit the download to maxPackageBodyBytes to prevent a malicious server from
+	// exhausting disk space or memory. Reading one byte beyond the limit detects overflow.
+	limited := io.LimitReader(resp.Body, maxPackageBodyBytes+1)
+	tr := io.TeeReader(limited, detailsReporter)
+	n, err := io.Copy(tmpFile, tr)
+	if err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("cannot write package %s to temp file: %v", pkgName, err)
+	}
+	if n > maxPackageBodyBytes {
+		_ = tmpFile.Close()
+		return fmt.Errorf("package %s download exceeds size limit of %d bytes", pkgName, maxPackageBodyBytes)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("cannot close temp file for package %s: %v", pkgName, err)
+	}
+
+	// Verify X.509 signature when the capability is declared and a verifier is set.
+	needsSigVerify := s.signatureVerifier != nil &&
+		s.clientSyncedState.Capabilities()&protobufs.AgentCapabilities_AgentCapabilities_VerifiesPackageSignatures != 0
+	if needsSigVerify {
+		content, err := os.ReadFile(tmpPath)
+		if err != nil {
+			return fmt.Errorf("cannot read temp file for signature verification of package %s: %v", pkgName, err)
+		}
+		if err := s.signatureVerifier.VerifyFile(file, content); err != nil {
+			return fmt.Errorf("signature verification failed for package %s: %w", pkgName, err)
+		}
+	}
+
+	// Open the temp file again and pass it to UpdateContent.
+	tmpFileRead, err := os.Open(tmpPath)
+	if err != nil {
+		return fmt.Errorf("cannot reopen temp file for package %s: %v", pkgName, err)
+	}
+	defer func() { _ = tmpFileRead.Close() }()
+
+	err = s.localState.UpdateContent(ctx, pkgName, tmpFileRead, file.ContentHash, file.Signature)
 	if err != nil {
 		return fmt.Errorf("failed to install/update the package %s downloaded from %s: %v", pkgName, file.DownloadUrl, err)
 	}
