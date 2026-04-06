@@ -239,6 +239,12 @@ The interface exists for three reasons:
 
 #### `X509SignatureVerifier`
 
+`NewX509SignatureVerifier(trustAnchors)` panics if `trustAnchors` is nil. This is
+intentional: passing nil would cause `x509.Certificate.Verify` to fall back to the
+platform system root pool, silently trusting the entire public web PKI rather than the
+operator-configured CA. The panic fires at the misconfigured call site rather than
+allowing a silent trust-boundary bypass.
+
 The concrete implementation performs:
 
 1. **Presence check.** If `Signature` or `SigningCertChain` is absent, returns

@@ -40,8 +40,14 @@ type X509SignatureVerifier struct {
 }
 
 // NewX509SignatureVerifier creates a new verifier using the provided cert pool
-// as the set of trusted CA certificates. trustAnchors must not be nil.
+// as the set of trusted CA certificates. trustAnchors must not be nil; passing
+// nil would cause x509.Certificate.Verify to fall back to the platform system
+// root pool, silently trusting the entire public web PKI instead of the
+// operator-configured CA.
 func NewX509SignatureVerifier(trustAnchors *x509.CertPool) *X509SignatureVerifier {
+	if trustAnchors == nil {
+		panic("signing.NewX509SignatureVerifier: trustAnchors must not be nil")
+	}
 	return &X509SignatureVerifier{trustAnchors: trustAnchors}
 }
 

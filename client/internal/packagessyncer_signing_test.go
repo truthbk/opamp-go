@@ -46,7 +46,7 @@ func runSyncerWithSignature(
 	fileSigner *signing.FileSigner,
 	signatureVerifier signing.SignatureVerifier,
 	capabilities protobufs.AgentCapabilities,
-) (*protobufs.PackageStatus, error) {
+) *protobufs.PackageStatus {
 	t.Helper()
 
 	_, serverURL := createTestHTTPServer(t, fileContent)
@@ -98,8 +98,7 @@ func runSyncerWithSignature(
 	require.NoError(t, s.clientSyncedState.SetPackageStatuses(s.statuses))
 	s.doSync(context.Background())
 
-	status := s.statuses.Packages["testpkg"]
-	return status, nil
+	return s.statuses.Packages["testpkg"]
 }
 
 func TestPackageSyncer_ValidSignatureAccepted(t *testing.T) {
@@ -111,7 +110,7 @@ func TestPackageSyncer_ValidSignatureAccepted(t *testing.T) {
 		protobufs.AgentCapabilities_AgentCapabilities_VerifiesPackageSignatures |
 		protobufs.AgentCapabilities_AgentCapabilities_ReportsStatus
 
-	status, _ := runSyncerWithSignature(t, content, fileSigner, verifier, caps)
+	status := runSyncerWithSignature(t, content, fileSigner, verifier, caps)
 	require.NotNil(t, status)
 	assert.Equal(t, protobufs.PackageStatusEnum_PackageStatusEnum_Installed, status.Status)
 	assert.Empty(t, status.ErrorMessage)
@@ -133,7 +132,7 @@ func TestPackageSyncer_InvalidSignatureRejected(t *testing.T) {
 	otherPool.AppendCertsFromPEM(otherCAPEM)
 	wrongVerifier := signing.NewX509SignatureVerifier(otherPool)
 
-	status, _ := runSyncerWithSignature(t, content, fileSigner, wrongVerifier, caps)
+	status := runSyncerWithSignature(t, content, fileSigner, wrongVerifier, caps)
 	require.NotNil(t, status)
 	assert.Equal(t, protobufs.PackageStatusEnum_PackageStatusEnum_InstallFailed, status.Status)
 	assert.Contains(t, status.ErrorMessage, "signature verification failed")
@@ -149,7 +148,7 @@ func TestPackageSyncer_MissingSignatureRejected(t *testing.T) {
 		protobufs.AgentCapabilities_AgentCapabilities_ReportsStatus
 
 	// No fileSigner => Signature field left empty.
-	status, _ := runSyncerWithSignature(t, content, nil, verifier, caps)
+	status := runSyncerWithSignature(t, content, nil, verifier, caps)
 	require.NotNil(t, status)
 	assert.Equal(t, protobufs.PackageStatusEnum_PackageStatusEnum_InstallFailed, status.Status)
 	assert.Contains(t, status.ErrorMessage, "signature verification failed")
@@ -172,7 +171,7 @@ func TestPackageSyncer_SignatureIgnoredWithoutCapability(t *testing.T) {
 		protobufs.AgentCapabilities_AgentCapabilities_ReportsPackageStatuses |
 		protobufs.AgentCapabilities_AgentCapabilities_ReportsStatus
 
-	status, _ := runSyncerWithSignature(t, content, fileSigner, wrongVerifier, caps)
+	status := runSyncerWithSignature(t, content, fileSigner, wrongVerifier, caps)
 	require.NotNil(t, status)
 	// Package should be installed because verification is skipped.
 	assert.Equal(t, protobufs.PackageStatusEnum_PackageStatusEnum_Installed, status.Status)
@@ -190,7 +189,7 @@ func TestPackageSyncer_NilVerifierWithCapabilityFails(t *testing.T) {
 		protobufs.AgentCapabilities_AgentCapabilities_VerifiesPackageSignatures |
 		protobufs.AgentCapabilities_AgentCapabilities_ReportsStatus
 
-	status, _ := runSyncerWithSignature(t, content, nil, nil, caps)
+	status := runSyncerWithSignature(t, content, nil, nil, caps)
 	require.NotNil(t, status)
 	assert.Equal(t, protobufs.PackageStatusEnum_PackageStatusEnum_InstallFailed, status.Status)
 	assert.Contains(t, status.ErrorMessage, "SignatureVerifier is not configured")

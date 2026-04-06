@@ -562,18 +562,19 @@ func (c *ClientCommon) SetCapabilities(capabilities *protobufs.AgentCapabilities
 		return nil
 	}
 	// According to OpAMP spec this capability MUST be set, since all Agents MUST report status.
-	*capabilities |= protobufs.AgentCapabilities_AgentCapabilities_ReportsStatus
+	// Work with a local copy so the caller's variable is not modified.
+	caps := *capabilities | protobufs.AgentCapabilities_AgentCapabilities_ReportsStatus
 
 	// validate capabilities only if the client has been started as validation logic depends on
 	// StartSettings being set.
 	// validateCapabilities is called in PrepareStart() before Start() is called.
 	if c.isStarted {
-		if err := c.validateCapabilities(*capabilities); err != nil {
+		if err := c.validateCapabilities(caps); err != nil {
 			return err
 		}
 	}
 	// store the capabilities to send
-	if err := c.ClientSyncedState.SetCapabilities(capabilities); err != nil {
+	if err := c.ClientSyncedState.SetCapabilities(&caps); err != nil {
 		return err
 	}
 	// send the new customCapabilities to the Server
