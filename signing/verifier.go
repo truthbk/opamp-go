@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -37,6 +38,28 @@ type SignatureVerifier interface {
 // configured pool of trust anchors (CA certificates).
 type X509SignatureVerifier struct {
 	trustAnchors *x509.CertPool
+}
+
+// VerifierFromFile reads a PEM-encoded CA certificate from caCertFile, builds
+// an x509.CertPool, and returns an X509SignatureVerifier backed by that pool.
+//
+// This is the recommended entry point for production code. It is equivalent to
+// reading the file, calling x509.NewCertPool().AppendCertsFromPEM(), and then
+// calling NewX509SignatureVerifier — but collapses those steps into one call,
+// eliminating duplicated error handling in callers.
+//
+// Returns an error if the file cannot be read or contains no valid PEM
+// CERTIFICATE blocks.
+func VerifierFromFile(caCertFile string) (*X509SignatureVerifier, error) {
+	pemBytes, err := os.ReadFile(caCertFile)
+	if err != nil {
+		return nil, fmt.Errorf("signing: cannot read ca_cert_file %q: %w", caCertFile, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return nil, fmt.Errorf("signing: ca_cert_file %q contains no valid PEM certificates", caCertFile)
+	}
+	return NewX509SignatureVerifier(pool), nil
 }
 
 // NewX509SignatureVerifier creates a new verifier using the provided cert pool
