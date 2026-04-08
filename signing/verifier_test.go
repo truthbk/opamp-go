@@ -247,6 +247,61 @@ func TestVerifyFile_MissingSignature(t *testing.T) {
 	assert.ErrorIs(t, err, signing.ErrMissingSignature)
 }
 
+func TestVerifyFile_ExpiredCert(t *testing.T) {
+	caKey, caCert, caCertPEM, err := signing.GenerateECDSACA()
+	require.NoError(t, err)
+
+	// Leaf cert with NotAfter in the past.
+	expired := time.Now().Add(-2 * time.Hour)
+	leafTLS, leafChainPEM := generateCustomLeafCert(
+		t, caCert, caKey,
+		expired.Add(-time.Hour), expired,
+		[]x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
+	)
+
+	fs, err := signing.NewFileSigner(leafTLS, leafChainPEM)
+	require.NoError(t, err)
+
+	content := []byte("binary package content")
+	file := &protobufs.DownloadableFile{}
+	require.NoError(t, fs.SignFile(file, content))
+
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(caCertPEM)
+	verifier := signing.NewX509SignatureVerifier(pool)
+
+	err = verifier.VerifyFile(file, content)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "certificate chain verification failed")
+}
+
+func TestVerifyFile_WrongEKU(t *testing.T) {
+	caKey, caCert, caCertPEM, err := signing.GenerateECDSACA()
+	require.NoError(t, err)
+
+	// Leaf has only ServerAuth EKU, not CodeSigning.
+	leafTLS, leafChainPEM := generateCustomLeafCert(
+		t, caCert, caKey,
+		time.Now().Add(-time.Minute), time.Now().Add(24*time.Hour),
+		[]x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	)
+
+	fs, err := signing.NewFileSigner(leafTLS, leafChainPEM)
+	require.NoError(t, err)
+
+	content := []byte("binary package content")
+	file := &protobufs.DownloadableFile{}
+	require.NoError(t, fs.SignFile(file, content))
+
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(caCertPEM)
+	verifier := signing.NewX509SignatureVerifier(pool)
+
+	err = verifier.VerifyFile(file, content)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "certificate chain verification failed")
+}
+
 func TestVerifyFile_UnknownCA(t *testing.T) {
 	// Sign with CA-A, verify with CA-B — confirms VerifyFile threads through
 	// verifyCertChain the same way VerifyRemoteConfig does.
