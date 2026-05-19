@@ -1271,21 +1271,6 @@ type ServerToAgent struct {
 	// A custom message sent from the Server to an Agent.
 	// Status: [Development]
 	CustomMessage *CustomMessage `protobuf:"bytes,11,opt,name=custom_message,json=customMessage,proto3" json:"custom_message,omitempty"`
-	// Sent by the Server in its first ServerToAgent message in response to an
-	// Agent that has set the RequiresPayloadTrustVerification capability.
-	// Carries the signing certificate chain the Agent will use to verify
-	// subsequent ServerToAgent messages. If the Agent set
-	// RequiresPayloadTrustVerification but the first ServerToAgent does not
-	// include trust_chain_response, the Agent MUST terminate the connection.
-	// See the Message Attestation section of the specification.
-	// Status: [Development]
-	TrustChainResponse *TrustChainResponse `protobuf:"bytes,12,opt,name=trust_chain_response,json=trustChainResponse,proto3" json:"trust_chain_response,omitempty"`
-	// The signature of this ServerToAgent message. The exact bytes that are
-	// signed and the verification procedure are defined in the
-	// Message Attestation section of the specification. Set only after the
-	// payload trust verification handshake has completed successfully.
-	// Status: [Development]
-	Signature     []byte `protobuf:"bytes,13,opt,name=signature,proto3" json:"signature,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1397,20 +1382,6 @@ func (x *ServerToAgent) GetCustomMessage() *CustomMessage {
 	return nil
 }
 
-func (x *ServerToAgent) GetTrustChainResponse() *TrustChainResponse {
-	if x != nil {
-		return x.TrustChainResponse
-	}
-	return nil
-}
-
-func (x *ServerToAgent) GetSignature() []byte {
-	if x != nil {
-		return x.Signature
-	}
-	return nil
-}
-
 // TrustChainResponse carries the signing certificate chain used by the Server
 // to sign subsequent ServerToAgent messages, as part of the payload trust
 // verification handshake. See the Message Attestation section of the
@@ -1475,6 +1446,95 @@ func (x *TrustChainResponse) GetErrorMessage() string {
 	return ""
 }
 
+// SignedServerToAgent wraps a ServerToAgent message when the payload trust
+// verification handshake has been negotiated between Server and Agent. When
+// both AgentCapabilities_RequiresPayloadTrustVerification (set by the Agent)
+// and ServerCapabilities_OffersPayloadTrustVerification (set by the Server)
+// are advertised, every Server-to-Agent message on the connection is wrapped
+// in SignedServerToAgent.
+//
+// The signature is computed and verified over the bytes of the payload field
+// exactly as they appear on the wire (a "detached" signature). This avoids
+// any dependency on canonical protobuf encoding, which is not guaranteed
+// across protobuf library versions, schema changes, or build flags.
+//
+// See the Message Attestation section of the specification.
+// Status: [Development]
+type SignedServerToAgent struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Serialised bytes of a ServerToAgent message. The Agent verifies the
+	// detached signature over these exact bytes, without re-marshalling,
+	// and then unmarshals them into a ServerToAgent for normal processing.
+	Payload []byte `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`
+	// Detached signature over the bytes of the payload field. MAY be empty
+	// on the first SignedServerToAgent of a connection: trust on the first
+	// message is established by validating the certificate chain carried in
+	// trust_chain_response against the Agent's pre-configured payload trust
+	// anchor. MUST be present and verifiable on every subsequent
+	// SignedServerToAgent.
+	Signature []byte `protobuf:"bytes,2,opt,name=signature,proto3" json:"signature,omitempty"`
+	// Sent only in the first SignedServerToAgent on a connection. Carries
+	// the signing certificate chain the Agent will use to verify signatures
+	// on subsequent messages. If the Agent set
+	// RequiresPayloadTrustVerification but the first SignedServerToAgent
+	// does not include a usable trust_chain_response, the Agent MUST
+	// terminate the connection.
+	TrustChainResponse *TrustChainResponse `protobuf:"bytes,3,opt,name=trust_chain_response,json=trustChainResponse,proto3" json:"trust_chain_response,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *SignedServerToAgent) Reset() {
+	*x = SignedServerToAgent{}
+	mi := &file_opamp_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SignedServerToAgent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SignedServerToAgent) ProtoMessage() {}
+
+func (x *SignedServerToAgent) ProtoReflect() protoreflect.Message {
+	mi := &file_opamp_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SignedServerToAgent.ProtoReflect.Descriptor instead.
+func (*SignedServerToAgent) Descriptor() ([]byte, []int) {
+	return file_opamp_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *SignedServerToAgent) GetPayload() []byte {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+func (x *SignedServerToAgent) GetSignature() []byte {
+	if x != nil {
+		return x.Signature
+	}
+	return nil
+}
+
+func (x *SignedServerToAgent) GetTrustChainResponse() *TrustChainResponse {
+	if x != nil {
+		return x.TrustChainResponse
+	}
+	return nil
+}
+
 // The OpAMPConnectionSettings message is a collection of fields which comprise an
 // offer from the Server to the Agent to use the specified settings for OpAMP
 // connection.
@@ -1521,7 +1581,7 @@ type OpAMPConnectionSettings struct {
 
 func (x *OpAMPConnectionSettings) Reset() {
 	*x = OpAMPConnectionSettings{}
-	mi := &file_opamp_proto_msgTypes[9]
+	mi := &file_opamp_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1533,7 +1593,7 @@ func (x *OpAMPConnectionSettings) String() string {
 func (*OpAMPConnectionSettings) ProtoMessage() {}
 
 func (x *OpAMPConnectionSettings) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[9]
+	mi := &file_opamp_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1546,7 +1606,7 @@ func (x *OpAMPConnectionSettings) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpAMPConnectionSettings.ProtoReflect.Descriptor instead.
 func (*OpAMPConnectionSettings) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{9}
+	return file_opamp_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *OpAMPConnectionSettings) GetDestinationEndpoint() string {
@@ -1626,7 +1686,7 @@ type TelemetryConnectionSettings struct {
 
 func (x *TelemetryConnectionSettings) Reset() {
 	*x = TelemetryConnectionSettings{}
-	mi := &file_opamp_proto_msgTypes[10]
+	mi := &file_opamp_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1638,7 +1698,7 @@ func (x *TelemetryConnectionSettings) String() string {
 func (*TelemetryConnectionSettings) ProtoMessage() {}
 
 func (x *TelemetryConnectionSettings) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[10]
+	mi := &file_opamp_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1651,7 +1711,7 @@ func (x *TelemetryConnectionSettings) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TelemetryConnectionSettings.ProtoReflect.Descriptor instead.
 func (*TelemetryConnectionSettings) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{10}
+	return file_opamp_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *TelemetryConnectionSettings) GetDestinationEndpoint() string {
@@ -1742,7 +1802,7 @@ type OtherConnectionSettings struct {
 
 func (x *OtherConnectionSettings) Reset() {
 	*x = OtherConnectionSettings{}
-	mi := &file_opamp_proto_msgTypes[11]
+	mi := &file_opamp_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1754,7 +1814,7 @@ func (x *OtherConnectionSettings) String() string {
 func (*OtherConnectionSettings) ProtoMessage() {}
 
 func (x *OtherConnectionSettings) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[11]
+	mi := &file_opamp_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1767,7 +1827,7 @@ func (x *OtherConnectionSettings) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OtherConnectionSettings.ProtoReflect.Descriptor instead.
 func (*OtherConnectionSettings) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{11}
+	return file_opamp_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *OtherConnectionSettings) GetDestinationEndpoint() string {
@@ -1835,7 +1895,7 @@ type TLSConnectionSettings struct {
 
 func (x *TLSConnectionSettings) Reset() {
 	*x = TLSConnectionSettings{}
-	mi := &file_opamp_proto_msgTypes[12]
+	mi := &file_opamp_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1847,7 +1907,7 @@ func (x *TLSConnectionSettings) String() string {
 func (*TLSConnectionSettings) ProtoMessage() {}
 
 func (x *TLSConnectionSettings) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[12]
+	mi := &file_opamp_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1860,7 +1920,7 @@ func (x *TLSConnectionSettings) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TLSConnectionSettings.ProtoReflect.Descriptor instead.
 func (*TLSConnectionSettings) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{12}
+	return file_opamp_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *TLSConnectionSettings) GetCaPemContents() string {
@@ -1921,7 +1981,7 @@ type ProxyConnectionSettings struct {
 
 func (x *ProxyConnectionSettings) Reset() {
 	*x = ProxyConnectionSettings{}
-	mi := &file_opamp_proto_msgTypes[13]
+	mi := &file_opamp_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1933,7 +1993,7 @@ func (x *ProxyConnectionSettings) String() string {
 func (*ProxyConnectionSettings) ProtoMessage() {}
 
 func (x *ProxyConnectionSettings) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[13]
+	mi := &file_opamp_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1946,7 +2006,7 @@ func (x *ProxyConnectionSettings) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProxyConnectionSettings.ProtoReflect.Descriptor instead.
 func (*ProxyConnectionSettings) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{13}
+	return file_opamp_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ProxyConnectionSettings) GetUrl() string {
@@ -1973,7 +2033,7 @@ type Headers struct {
 
 func (x *Headers) Reset() {
 	*x = Headers{}
-	mi := &file_opamp_proto_msgTypes[14]
+	mi := &file_opamp_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1985,7 +2045,7 @@ func (x *Headers) String() string {
 func (*Headers) ProtoMessage() {}
 
 func (x *Headers) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[14]
+	mi := &file_opamp_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1998,7 +2058,7 @@ func (x *Headers) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Headers.ProtoReflect.Descriptor instead.
 func (*Headers) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{14}
+	return file_opamp_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Headers) GetHeaders() []*Header {
@@ -2019,7 +2079,7 @@ type Header struct {
 
 func (x *Header) Reset() {
 	*x = Header{}
-	mi := &file_opamp_proto_msgTypes[15]
+	mi := &file_opamp_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2031,7 +2091,7 @@ func (x *Header) String() string {
 func (*Header) ProtoMessage() {}
 
 func (x *Header) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[15]
+	mi := &file_opamp_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2044,7 +2104,7 @@ func (x *Header) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Header.ProtoReflect.Descriptor instead.
 func (*Header) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{15}
+	return file_opamp_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Header) GetKey() string {
@@ -2081,7 +2141,7 @@ type TLSCertificate struct {
 
 func (x *TLSCertificate) Reset() {
 	*x = TLSCertificate{}
-	mi := &file_opamp_proto_msgTypes[16]
+	mi := &file_opamp_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2093,7 +2153,7 @@ func (x *TLSCertificate) String() string {
 func (*TLSCertificate) ProtoMessage() {}
 
 func (x *TLSCertificate) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[16]
+	mi := &file_opamp_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2106,7 +2166,7 @@ func (x *TLSCertificate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TLSCertificate.ProtoReflect.Descriptor instead.
 func (*TLSCertificate) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{16}
+	return file_opamp_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *TLSCertificate) GetCert() []byte {
@@ -2177,7 +2237,7 @@ type ConnectionSettingsOffers struct {
 
 func (x *ConnectionSettingsOffers) Reset() {
 	*x = ConnectionSettingsOffers{}
-	mi := &file_opamp_proto_msgTypes[17]
+	mi := &file_opamp_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2189,7 +2249,7 @@ func (x *ConnectionSettingsOffers) String() string {
 func (*ConnectionSettingsOffers) ProtoMessage() {}
 
 func (x *ConnectionSettingsOffers) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[17]
+	mi := &file_opamp_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2202,7 +2262,7 @@ func (x *ConnectionSettingsOffers) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConnectionSettingsOffers.ProtoReflect.Descriptor instead.
 func (*ConnectionSettingsOffers) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{17}
+	return file_opamp_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ConnectionSettingsOffers) GetHash() []byte {
@@ -2269,7 +2329,7 @@ type PackagesAvailable struct {
 
 func (x *PackagesAvailable) Reset() {
 	*x = PackagesAvailable{}
-	mi := &file_opamp_proto_msgTypes[18]
+	mi := &file_opamp_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2281,7 +2341,7 @@ func (x *PackagesAvailable) String() string {
 func (*PackagesAvailable) ProtoMessage() {}
 
 func (x *PackagesAvailable) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[18]
+	mi := &file_opamp_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2294,7 +2354,7 @@ func (x *PackagesAvailable) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PackagesAvailable.ProtoReflect.Descriptor instead.
 func (*PackagesAvailable) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{18}
+	return file_opamp_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *PackagesAvailable) GetPackages() map[string]*PackageAvailable {
@@ -2347,7 +2407,7 @@ type PackageAvailable struct {
 
 func (x *PackageAvailable) Reset() {
 	*x = PackageAvailable{}
-	mi := &file_opamp_proto_msgTypes[19]
+	mi := &file_opamp_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2359,7 +2419,7 @@ func (x *PackageAvailable) String() string {
 func (*PackageAvailable) ProtoMessage() {}
 
 func (x *PackageAvailable) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[19]
+	mi := &file_opamp_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2372,7 +2432,7 @@ func (x *PackageAvailable) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PackageAvailable.ProtoReflect.Descriptor instead.
 func (*PackageAvailable) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{19}
+	return file_opamp_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *PackageAvailable) GetType() PackageType {
@@ -2433,7 +2493,7 @@ type DownloadableFile struct {
 
 func (x *DownloadableFile) Reset() {
 	*x = DownloadableFile{}
-	mi := &file_opamp_proto_msgTypes[20]
+	mi := &file_opamp_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2445,7 +2505,7 @@ func (x *DownloadableFile) String() string {
 func (*DownloadableFile) ProtoMessage() {}
 
 func (x *DownloadableFile) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[20]
+	mi := &file_opamp_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2458,7 +2518,7 @@ func (x *DownloadableFile) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DownloadableFile.ProtoReflect.Descriptor instead.
 func (*DownloadableFile) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{20}
+	return file_opamp_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *DownloadableFile) GetDownloadUrl() string {
@@ -2504,7 +2564,7 @@ type ServerErrorResponse struct {
 
 func (x *ServerErrorResponse) Reset() {
 	*x = ServerErrorResponse{}
-	mi := &file_opamp_proto_msgTypes[21]
+	mi := &file_opamp_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2516,7 +2576,7 @@ func (x *ServerErrorResponse) String() string {
 func (*ServerErrorResponse) ProtoMessage() {}
 
 func (x *ServerErrorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[21]
+	mi := &file_opamp_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2529,7 +2589,7 @@ func (x *ServerErrorResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerErrorResponse.ProtoReflect.Descriptor instead.
 func (*ServerErrorResponse) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{21}
+	return file_opamp_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *ServerErrorResponse) GetType() ServerErrorResponseType {
@@ -2582,7 +2642,7 @@ type RetryInfo struct {
 
 func (x *RetryInfo) Reset() {
 	*x = RetryInfo{}
-	mi := &file_opamp_proto_msgTypes[22]
+	mi := &file_opamp_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2594,7 +2654,7 @@ func (x *RetryInfo) String() string {
 func (*RetryInfo) ProtoMessage() {}
 
 func (x *RetryInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[22]
+	mi := &file_opamp_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2607,7 +2667,7 @@ func (x *RetryInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RetryInfo.ProtoReflect.Descriptor instead.
 func (*RetryInfo) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{22}
+	return file_opamp_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *RetryInfo) GetRetryAfterNanoseconds() uint64 {
@@ -2629,7 +2689,7 @@ type ServerToAgentCommand struct {
 
 func (x *ServerToAgentCommand) Reset() {
 	*x = ServerToAgentCommand{}
-	mi := &file_opamp_proto_msgTypes[23]
+	mi := &file_opamp_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2641,7 +2701,7 @@ func (x *ServerToAgentCommand) String() string {
 func (*ServerToAgentCommand) ProtoMessage() {}
 
 func (x *ServerToAgentCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[23]
+	mi := &file_opamp_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2654,7 +2714,7 @@ func (x *ServerToAgentCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerToAgentCommand.ProtoReflect.Descriptor instead.
 func (*ServerToAgentCommand) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{23}
+	return file_opamp_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *ServerToAgentCommand) GetType() CommandType {
@@ -2704,7 +2764,7 @@ type AgentDescription struct {
 
 func (x *AgentDescription) Reset() {
 	*x = AgentDescription{}
-	mi := &file_opamp_proto_msgTypes[24]
+	mi := &file_opamp_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2716,7 +2776,7 @@ func (x *AgentDescription) String() string {
 func (*AgentDescription) ProtoMessage() {}
 
 func (x *AgentDescription) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[24]
+	mi := &file_opamp_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2729,7 +2789,7 @@ func (x *AgentDescription) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentDescription.ProtoReflect.Descriptor instead.
 func (*AgentDescription) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{24}
+	return file_opamp_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *AgentDescription) GetIdentifyingAttributes() []*KeyValue {
@@ -2774,7 +2834,7 @@ type ComponentHealth struct {
 
 func (x *ComponentHealth) Reset() {
 	*x = ComponentHealth{}
-	mi := &file_opamp_proto_msgTypes[25]
+	mi := &file_opamp_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2786,7 +2846,7 @@ func (x *ComponentHealth) String() string {
 func (*ComponentHealth) ProtoMessage() {}
 
 func (x *ComponentHealth) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[25]
+	mi := &file_opamp_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2799,7 +2859,7 @@ func (x *ComponentHealth) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ComponentHealth.ProtoReflect.Descriptor instead.
 func (*ComponentHealth) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{25}
+	return file_opamp_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *ComponentHealth) GetHealthy() bool {
@@ -2854,7 +2914,7 @@ type EffectiveConfig struct {
 
 func (x *EffectiveConfig) Reset() {
 	*x = EffectiveConfig{}
-	mi := &file_opamp_proto_msgTypes[26]
+	mi := &file_opamp_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2866,7 +2926,7 @@ func (x *EffectiveConfig) String() string {
 func (*EffectiveConfig) ProtoMessage() {}
 
 func (x *EffectiveConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[26]
+	mi := &file_opamp_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2879,7 +2939,7 @@ func (x *EffectiveConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EffectiveConfig.ProtoReflect.Descriptor instead.
 func (*EffectiveConfig) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{26}
+	return file_opamp_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *EffectiveConfig) GetConfigMap() *AgentConfigMap {
@@ -2906,7 +2966,7 @@ type RemoteConfigStatus struct {
 
 func (x *RemoteConfigStatus) Reset() {
 	*x = RemoteConfigStatus{}
-	mi := &file_opamp_proto_msgTypes[27]
+	mi := &file_opamp_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2918,7 +2978,7 @@ func (x *RemoteConfigStatus) String() string {
 func (*RemoteConfigStatus) ProtoMessage() {}
 
 func (x *RemoteConfigStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[27]
+	mi := &file_opamp_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2931,7 +2991,7 @@ func (x *RemoteConfigStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoteConfigStatus.ProtoReflect.Descriptor instead.
 func (*RemoteConfigStatus) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{27}
+	return file_opamp_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *RemoteConfigStatus) GetLastRemoteConfigHash() []byte {
@@ -2973,7 +3033,7 @@ type ConnectionSettingsStatus struct {
 
 func (x *ConnectionSettingsStatus) Reset() {
 	*x = ConnectionSettingsStatus{}
-	mi := &file_opamp_proto_msgTypes[28]
+	mi := &file_opamp_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2985,7 +3045,7 @@ func (x *ConnectionSettingsStatus) String() string {
 func (*ConnectionSettingsStatus) ProtoMessage() {}
 
 func (x *ConnectionSettingsStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[28]
+	mi := &file_opamp_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2998,7 +3058,7 @@ func (x *ConnectionSettingsStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConnectionSettingsStatus.ProtoReflect.Descriptor instead.
 func (*ConnectionSettingsStatus) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{28}
+	return file_opamp_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *ConnectionSettingsStatus) GetLastConnectionSettingsHash() []byte {
@@ -3048,7 +3108,7 @@ type PackageStatuses struct {
 
 func (x *PackageStatuses) Reset() {
 	*x = PackageStatuses{}
-	mi := &file_opamp_proto_msgTypes[29]
+	mi := &file_opamp_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3060,7 +3120,7 @@ func (x *PackageStatuses) String() string {
 func (*PackageStatuses) ProtoMessage() {}
 
 func (x *PackageStatuses) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[29]
+	mi := &file_opamp_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3073,7 +3133,7 @@ func (x *PackageStatuses) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PackageStatuses.ProtoReflect.Descriptor instead.
 func (*PackageStatuses) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{29}
+	return file_opamp_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *PackageStatuses) GetPackages() map[string]*PackageStatus {
@@ -3153,7 +3213,7 @@ type PackageStatus struct {
 
 func (x *PackageStatus) Reset() {
 	*x = PackageStatus{}
-	mi := &file_opamp_proto_msgTypes[30]
+	mi := &file_opamp_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3165,7 +3225,7 @@ func (x *PackageStatus) String() string {
 func (*PackageStatus) ProtoMessage() {}
 
 func (x *PackageStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[30]
+	mi := &file_opamp_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3178,7 +3238,7 @@ func (x *PackageStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PackageStatus.ProtoReflect.Descriptor instead.
 func (*PackageStatus) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{30}
+	return file_opamp_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *PackageStatus) GetName() string {
@@ -3251,7 +3311,7 @@ type PackageDownloadDetails struct {
 
 func (x *PackageDownloadDetails) Reset() {
 	*x = PackageDownloadDetails{}
-	mi := &file_opamp_proto_msgTypes[31]
+	mi := &file_opamp_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3263,7 +3323,7 @@ func (x *PackageDownloadDetails) String() string {
 func (*PackageDownloadDetails) ProtoMessage() {}
 
 func (x *PackageDownloadDetails) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[31]
+	mi := &file_opamp_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3276,7 +3336,7 @@ func (x *PackageDownloadDetails) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PackageDownloadDetails.ProtoReflect.Descriptor instead.
 func (*PackageDownloadDetails) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{31}
+	return file_opamp_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *PackageDownloadDetails) GetDownloadPercent() float64 {
@@ -3307,7 +3367,7 @@ type AgentIdentification struct {
 
 func (x *AgentIdentification) Reset() {
 	*x = AgentIdentification{}
-	mi := &file_opamp_proto_msgTypes[32]
+	mi := &file_opamp_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3319,7 +3379,7 @@ func (x *AgentIdentification) String() string {
 func (*AgentIdentification) ProtoMessage() {}
 
 func (x *AgentIdentification) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[32]
+	mi := &file_opamp_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3332,7 +3392,7 @@ func (x *AgentIdentification) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentIdentification.ProtoReflect.Descriptor instead.
 func (*AgentIdentification) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{32}
+	return file_opamp_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *AgentIdentification) GetNewInstanceUid() []byte {
@@ -3365,7 +3425,7 @@ type AgentRemoteConfig struct {
 
 func (x *AgentRemoteConfig) Reset() {
 	*x = AgentRemoteConfig{}
-	mi := &file_opamp_proto_msgTypes[33]
+	mi := &file_opamp_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3377,7 +3437,7 @@ func (x *AgentRemoteConfig) String() string {
 func (*AgentRemoteConfig) ProtoMessage() {}
 
 func (x *AgentRemoteConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[33]
+	mi := &file_opamp_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3390,7 +3450,7 @@ func (x *AgentRemoteConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentRemoteConfig.ProtoReflect.Descriptor instead.
 func (*AgentRemoteConfig) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{33}
+	return file_opamp_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *AgentRemoteConfig) GetConfig() *AgentConfigMap {
@@ -3421,7 +3481,7 @@ type AgentConfigMap struct {
 
 func (x *AgentConfigMap) Reset() {
 	*x = AgentConfigMap{}
-	mi := &file_opamp_proto_msgTypes[34]
+	mi := &file_opamp_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3433,7 +3493,7 @@ func (x *AgentConfigMap) String() string {
 func (*AgentConfigMap) ProtoMessage() {}
 
 func (x *AgentConfigMap) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[34]
+	mi := &file_opamp_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3446,7 +3506,7 @@ func (x *AgentConfigMap) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentConfigMap.ProtoReflect.Descriptor instead.
 func (*AgentConfigMap) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{34}
+	return file_opamp_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *AgentConfigMap) GetConfigMap() map[string]*AgentConfigFile {
@@ -3470,7 +3530,7 @@ type AgentConfigFile struct {
 
 func (x *AgentConfigFile) Reset() {
 	*x = AgentConfigFile{}
-	mi := &file_opamp_proto_msgTypes[35]
+	mi := &file_opamp_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3482,7 +3542,7 @@ func (x *AgentConfigFile) String() string {
 func (*AgentConfigFile) ProtoMessage() {}
 
 func (x *AgentConfigFile) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[35]
+	mi := &file_opamp_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3495,7 +3555,7 @@ func (x *AgentConfigFile) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentConfigFile.ProtoReflect.Descriptor instead.
 func (*AgentConfigFile) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{35}
+	return file_opamp_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *AgentConfigFile) GetBody() []byte {
@@ -3525,7 +3585,7 @@ type CustomCapabilities struct {
 
 func (x *CustomCapabilities) Reset() {
 	*x = CustomCapabilities{}
-	mi := &file_opamp_proto_msgTypes[36]
+	mi := &file_opamp_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3537,7 +3597,7 @@ func (x *CustomCapabilities) String() string {
 func (*CustomCapabilities) ProtoMessage() {}
 
 func (x *CustomCapabilities) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[36]
+	mi := &file_opamp_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3550,7 +3610,7 @@ func (x *CustomCapabilities) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CustomCapabilities.ProtoReflect.Descriptor instead.
 func (*CustomCapabilities) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{36}
+	return file_opamp_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *CustomCapabilities) GetCapabilities() []string {
@@ -3581,7 +3641,7 @@ type CustomMessage struct {
 
 func (x *CustomMessage) Reset() {
 	*x = CustomMessage{}
-	mi := &file_opamp_proto_msgTypes[37]
+	mi := &file_opamp_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3593,7 +3653,7 @@ func (x *CustomMessage) String() string {
 func (*CustomMessage) ProtoMessage() {}
 
 func (x *CustomMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[37]
+	mi := &file_opamp_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3606,7 +3666,7 @@ func (x *CustomMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CustomMessage.ProtoReflect.Descriptor instead.
 func (*CustomMessage) Descriptor() ([]byte, []int) {
-	return file_opamp_proto_rawDescGZIP(), []int{37}
+	return file_opamp_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *CustomMessage) GetCapability() string {
@@ -3640,7 +3700,7 @@ type TrustChainResponse_Certificate struct {
 
 func (x *TrustChainResponse_Certificate) Reset() {
 	*x = TrustChainResponse_Certificate{}
-	mi := &file_opamp_proto_msgTypes[40]
+	mi := &file_opamp_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3652,7 +3712,7 @@ func (x *TrustChainResponse_Certificate) String() string {
 func (*TrustChainResponse_Certificate) ProtoMessage() {}
 
 func (x *TrustChainResponse_Certificate) ProtoReflect() protoreflect.Message {
-	mi := &file_opamp_proto_msgTypes[40]
+	mi := &file_opamp_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3717,7 +3777,7 @@ const file_opamp_proto_rawDesc = "" +
 	"\x11sub_component_map\x18\x02 \x03(\v22.opamp.proto.ComponentDetails.SubComponentMapEntryR\x0fsubComponentMap\x1aa\n" +
 	"\x14SubComponentMapEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x123\n" +
-	"\x05value\x18\x02 \x01(\v2\x1d.opamp.proto.ComponentDetailsR\x05value:\x028\x01\"\xb9\x06\n" +
+	"\x05value\x18\x02 \x01(\v2\x1d.opamp.proto.ComponentDetailsR\x05value:\x028\x01\"\xf5\x05\n" +
 	"\rServerToAgent\x12!\n" +
 	"\finstance_uid\x18\x01 \x01(\fR\vinstanceUid\x12G\n" +
 	"\x0eerror_response\x18\x02 \x01(\v2 .opamp.proto.ServerErrorResponseR\rerrorResponse\x12C\n" +
@@ -3730,14 +3790,16 @@ const file_opamp_proto_rawDesc = "" +
 	"\acommand\x18\t \x01(\v2!.opamp.proto.ServerToAgentCommandR\acommand\x12P\n" +
 	"\x13custom_capabilities\x18\n" +
 	" \x01(\v2\x1f.opamp.proto.CustomCapabilitiesR\x12customCapabilities\x12A\n" +
-	"\x0ecustom_message\x18\v \x01(\v2\x1a.opamp.proto.CustomMessageR\rcustomMessage\x12Q\n" +
-	"\x14trust_chain_response\x18\f \x01(\v2\x1f.opamp.proto.TrustChainResponseR\x12trustChainResponse\x12\x1c\n" +
-	"\tsignature\x18\r \x01(\fR\tsignature\"\xbd\x01\n" +
+	"\x0ecustom_message\x18\v \x01(\v2\x1a.opamp.proto.CustomMessageR\rcustomMessageJ\x04\b\f\x10\rJ\x04\b\r\x10\x0eR\x14trust_chain_responseR\tsignature\"\xbd\x01\n" +
 	"\x12TrustChainResponse\x12X\n" +
 	"\x11certificate_chain\x18\x01 \x03(\v2+.opamp.proto.TrustChainResponse.CertificateR\x10certificateChain\x12#\n" +
 	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage\x1a(\n" +
 	"\vCertificate\x12\x19\n" +
-	"\bder_data\x18\x01 \x01(\fR\aderData\"\xeb\x02\n" +
+	"\bder_data\x18\x01 \x01(\fR\aderData\"\xa0\x01\n" +
+	"\x13SignedServerToAgent\x12\x18\n" +
+	"\apayload\x18\x01 \x01(\fR\apayload\x12\x1c\n" +
+	"\tsignature\x18\x02 \x01(\fR\tsignature\x12Q\n" +
+	"\x14trust_chain_response\x18\x03 \x01(\v2\x1f.opamp.proto.TrustChainResponseR\x12trustChainResponse\"\xeb\x02\n" +
 	"\x17OpAMPConnectionSettings\x121\n" +
 	"\x14destination_endpoint\x18\x01 \x01(\tR\x13destinationEndpoint\x12.\n" +
 	"\aheaders\x18\x02 \x01(\v2\x14.opamp.proto.HeadersR\aheaders\x12=\n" +
@@ -3963,7 +4025,7 @@ func file_opamp_proto_rawDescGZIP() []byte {
 }
 
 var file_opamp_proto_enumTypes = make([]protoimpl.EnumInfo, 10)
-var file_opamp_proto_msgTypes = make([]protoimpl.MessageInfo, 47)
+var file_opamp_proto_msgTypes = make([]protoimpl.MessageInfo, 48)
 var file_opamp_proto_goTypes = []any{
 	(AgentToServerFlags)(0),                // 0: opamp.proto.AgentToServerFlags
 	(ServerToAgentFlags)(0),                // 1: opamp.proto.ServerToAgentFlags
@@ -3984,118 +4046,119 @@ var file_opamp_proto_goTypes = []any{
 	(*ComponentDetails)(nil),               // 16: opamp.proto.ComponentDetails
 	(*ServerToAgent)(nil),                  // 17: opamp.proto.ServerToAgent
 	(*TrustChainResponse)(nil),             // 18: opamp.proto.TrustChainResponse
-	(*OpAMPConnectionSettings)(nil),        // 19: opamp.proto.OpAMPConnectionSettings
-	(*TelemetryConnectionSettings)(nil),    // 20: opamp.proto.TelemetryConnectionSettings
-	(*OtherConnectionSettings)(nil),        // 21: opamp.proto.OtherConnectionSettings
-	(*TLSConnectionSettings)(nil),          // 22: opamp.proto.TLSConnectionSettings
-	(*ProxyConnectionSettings)(nil),        // 23: opamp.proto.ProxyConnectionSettings
-	(*Headers)(nil),                        // 24: opamp.proto.Headers
-	(*Header)(nil),                         // 25: opamp.proto.Header
-	(*TLSCertificate)(nil),                 // 26: opamp.proto.TLSCertificate
-	(*ConnectionSettingsOffers)(nil),       // 27: opamp.proto.ConnectionSettingsOffers
-	(*PackagesAvailable)(nil),              // 28: opamp.proto.PackagesAvailable
-	(*PackageAvailable)(nil),               // 29: opamp.proto.PackageAvailable
-	(*DownloadableFile)(nil),               // 30: opamp.proto.DownloadableFile
-	(*ServerErrorResponse)(nil),            // 31: opamp.proto.ServerErrorResponse
-	(*RetryInfo)(nil),                      // 32: opamp.proto.RetryInfo
-	(*ServerToAgentCommand)(nil),           // 33: opamp.proto.ServerToAgentCommand
-	(*AgentDescription)(nil),               // 34: opamp.proto.AgentDescription
-	(*ComponentHealth)(nil),                // 35: opamp.proto.ComponentHealth
-	(*EffectiveConfig)(nil),                // 36: opamp.proto.EffectiveConfig
-	(*RemoteConfigStatus)(nil),             // 37: opamp.proto.RemoteConfigStatus
-	(*ConnectionSettingsStatus)(nil),       // 38: opamp.proto.ConnectionSettingsStatus
-	(*PackageStatuses)(nil),                // 39: opamp.proto.PackageStatuses
-	(*PackageStatus)(nil),                  // 40: opamp.proto.PackageStatus
-	(*PackageDownloadDetails)(nil),         // 41: opamp.proto.PackageDownloadDetails
-	(*AgentIdentification)(nil),            // 42: opamp.proto.AgentIdentification
-	(*AgentRemoteConfig)(nil),              // 43: opamp.proto.AgentRemoteConfig
-	(*AgentConfigMap)(nil),                 // 44: opamp.proto.AgentConfigMap
-	(*AgentConfigFile)(nil),                // 45: opamp.proto.AgentConfigFile
-	(*CustomCapabilities)(nil),             // 46: opamp.proto.CustomCapabilities
-	(*CustomMessage)(nil),                  // 47: opamp.proto.CustomMessage
-	nil,                                    // 48: opamp.proto.AvailableComponents.ComponentsEntry
-	nil,                                    // 49: opamp.proto.ComponentDetails.SubComponentMapEntry
-	(*TrustChainResponse_Certificate)(nil), // 50: opamp.proto.TrustChainResponse.Certificate
-	nil,                                    // 51: opamp.proto.OtherConnectionSettings.OtherSettingsEntry
-	nil,                                    // 52: opamp.proto.ConnectionSettingsOffers.OtherConnectionsEntry
-	nil,                                    // 53: opamp.proto.PackagesAvailable.PackagesEntry
-	nil,                                    // 54: opamp.proto.ComponentHealth.ComponentHealthMapEntry
-	nil,                                    // 55: opamp.proto.PackageStatuses.PackagesEntry
-	nil,                                    // 56: opamp.proto.AgentConfigMap.ConfigMapEntry
-	(*KeyValue)(nil),                       // 57: opamp.proto.KeyValue
+	(*SignedServerToAgent)(nil),            // 19: opamp.proto.SignedServerToAgent
+	(*OpAMPConnectionSettings)(nil),        // 20: opamp.proto.OpAMPConnectionSettings
+	(*TelemetryConnectionSettings)(nil),    // 21: opamp.proto.TelemetryConnectionSettings
+	(*OtherConnectionSettings)(nil),        // 22: opamp.proto.OtherConnectionSettings
+	(*TLSConnectionSettings)(nil),          // 23: opamp.proto.TLSConnectionSettings
+	(*ProxyConnectionSettings)(nil),        // 24: opamp.proto.ProxyConnectionSettings
+	(*Headers)(nil),                        // 25: opamp.proto.Headers
+	(*Header)(nil),                         // 26: opamp.proto.Header
+	(*TLSCertificate)(nil),                 // 27: opamp.proto.TLSCertificate
+	(*ConnectionSettingsOffers)(nil),       // 28: opamp.proto.ConnectionSettingsOffers
+	(*PackagesAvailable)(nil),              // 29: opamp.proto.PackagesAvailable
+	(*PackageAvailable)(nil),               // 30: opamp.proto.PackageAvailable
+	(*DownloadableFile)(nil),               // 31: opamp.proto.DownloadableFile
+	(*ServerErrorResponse)(nil),            // 32: opamp.proto.ServerErrorResponse
+	(*RetryInfo)(nil),                      // 33: opamp.proto.RetryInfo
+	(*ServerToAgentCommand)(nil),           // 34: opamp.proto.ServerToAgentCommand
+	(*AgentDescription)(nil),               // 35: opamp.proto.AgentDescription
+	(*ComponentHealth)(nil),                // 36: opamp.proto.ComponentHealth
+	(*EffectiveConfig)(nil),                // 37: opamp.proto.EffectiveConfig
+	(*RemoteConfigStatus)(nil),             // 38: opamp.proto.RemoteConfigStatus
+	(*ConnectionSettingsStatus)(nil),       // 39: opamp.proto.ConnectionSettingsStatus
+	(*PackageStatuses)(nil),                // 40: opamp.proto.PackageStatuses
+	(*PackageStatus)(nil),                  // 41: opamp.proto.PackageStatus
+	(*PackageDownloadDetails)(nil),         // 42: opamp.proto.PackageDownloadDetails
+	(*AgentIdentification)(nil),            // 43: opamp.proto.AgentIdentification
+	(*AgentRemoteConfig)(nil),              // 44: opamp.proto.AgentRemoteConfig
+	(*AgentConfigMap)(nil),                 // 45: opamp.proto.AgentConfigMap
+	(*AgentConfigFile)(nil),                // 46: opamp.proto.AgentConfigFile
+	(*CustomCapabilities)(nil),             // 47: opamp.proto.CustomCapabilities
+	(*CustomMessage)(nil),                  // 48: opamp.proto.CustomMessage
+	nil,                                    // 49: opamp.proto.AvailableComponents.ComponentsEntry
+	nil,                                    // 50: opamp.proto.ComponentDetails.SubComponentMapEntry
+	(*TrustChainResponse_Certificate)(nil), // 51: opamp.proto.TrustChainResponse.Certificate
+	nil,                                    // 52: opamp.proto.OtherConnectionSettings.OtherSettingsEntry
+	nil,                                    // 53: opamp.proto.ConnectionSettingsOffers.OtherConnectionsEntry
+	nil,                                    // 54: opamp.proto.PackagesAvailable.PackagesEntry
+	nil,                                    // 55: opamp.proto.ComponentHealth.ComponentHealthMapEntry
+	nil,                                    // 56: opamp.proto.PackageStatuses.PackagesEntry
+	nil,                                    // 57: opamp.proto.AgentConfigMap.ConfigMapEntry
+	(*KeyValue)(nil),                       // 58: opamp.proto.KeyValue
 }
 var file_opamp_proto_depIdxs = []int32{
-	34, // 0: opamp.proto.AgentToServer.agent_description:type_name -> opamp.proto.AgentDescription
-	35, // 1: opamp.proto.AgentToServer.health:type_name -> opamp.proto.ComponentHealth
-	36, // 2: opamp.proto.AgentToServer.effective_config:type_name -> opamp.proto.EffectiveConfig
-	37, // 3: opamp.proto.AgentToServer.remote_config_status:type_name -> opamp.proto.RemoteConfigStatus
-	39, // 4: opamp.proto.AgentToServer.package_statuses:type_name -> opamp.proto.PackageStatuses
+	35, // 0: opamp.proto.AgentToServer.agent_description:type_name -> opamp.proto.AgentDescription
+	36, // 1: opamp.proto.AgentToServer.health:type_name -> opamp.proto.ComponentHealth
+	37, // 2: opamp.proto.AgentToServer.effective_config:type_name -> opamp.proto.EffectiveConfig
+	38, // 3: opamp.proto.AgentToServer.remote_config_status:type_name -> opamp.proto.RemoteConfigStatus
+	40, // 4: opamp.proto.AgentToServer.package_statuses:type_name -> opamp.proto.PackageStatuses
 	11, // 5: opamp.proto.AgentToServer.agent_disconnect:type_name -> opamp.proto.AgentDisconnect
 	12, // 6: opamp.proto.AgentToServer.connection_settings_request:type_name -> opamp.proto.ConnectionSettingsRequest
-	46, // 7: opamp.proto.AgentToServer.custom_capabilities:type_name -> opamp.proto.CustomCapabilities
-	47, // 8: opamp.proto.AgentToServer.custom_message:type_name -> opamp.proto.CustomMessage
+	47, // 7: opamp.proto.AgentToServer.custom_capabilities:type_name -> opamp.proto.CustomCapabilities
+	48, // 8: opamp.proto.AgentToServer.custom_message:type_name -> opamp.proto.CustomMessage
 	15, // 9: opamp.proto.AgentToServer.available_components:type_name -> opamp.proto.AvailableComponents
-	38, // 10: opamp.proto.AgentToServer.connection_settings_status:type_name -> opamp.proto.ConnectionSettingsStatus
+	39, // 10: opamp.proto.AgentToServer.connection_settings_status:type_name -> opamp.proto.ConnectionSettingsStatus
 	13, // 11: opamp.proto.ConnectionSettingsRequest.opamp:type_name -> opamp.proto.OpAMPConnectionSettingsRequest
 	14, // 12: opamp.proto.OpAMPConnectionSettingsRequest.certificate_request:type_name -> opamp.proto.CertificateRequest
-	48, // 13: opamp.proto.AvailableComponents.components:type_name -> opamp.proto.AvailableComponents.ComponentsEntry
-	57, // 14: opamp.proto.ComponentDetails.metadata:type_name -> opamp.proto.KeyValue
-	49, // 15: opamp.proto.ComponentDetails.sub_component_map:type_name -> opamp.proto.ComponentDetails.SubComponentMapEntry
-	31, // 16: opamp.proto.ServerToAgent.error_response:type_name -> opamp.proto.ServerErrorResponse
-	43, // 17: opamp.proto.ServerToAgent.remote_config:type_name -> opamp.proto.AgentRemoteConfig
-	27, // 18: opamp.proto.ServerToAgent.connection_settings:type_name -> opamp.proto.ConnectionSettingsOffers
-	28, // 19: opamp.proto.ServerToAgent.packages_available:type_name -> opamp.proto.PackagesAvailable
-	42, // 20: opamp.proto.ServerToAgent.agent_identification:type_name -> opamp.proto.AgentIdentification
-	33, // 21: opamp.proto.ServerToAgent.command:type_name -> opamp.proto.ServerToAgentCommand
-	46, // 22: opamp.proto.ServerToAgent.custom_capabilities:type_name -> opamp.proto.CustomCapabilities
-	47, // 23: opamp.proto.ServerToAgent.custom_message:type_name -> opamp.proto.CustomMessage
-	18, // 24: opamp.proto.ServerToAgent.trust_chain_response:type_name -> opamp.proto.TrustChainResponse
-	50, // 25: opamp.proto.TrustChainResponse.certificate_chain:type_name -> opamp.proto.TrustChainResponse.Certificate
-	24, // 26: opamp.proto.OpAMPConnectionSettings.headers:type_name -> opamp.proto.Headers
-	26, // 27: opamp.proto.OpAMPConnectionSettings.certificate:type_name -> opamp.proto.TLSCertificate
-	22, // 28: opamp.proto.OpAMPConnectionSettings.tls:type_name -> opamp.proto.TLSConnectionSettings
-	23, // 29: opamp.proto.OpAMPConnectionSettings.proxy:type_name -> opamp.proto.ProxyConnectionSettings
-	24, // 30: opamp.proto.TelemetryConnectionSettings.headers:type_name -> opamp.proto.Headers
-	26, // 31: opamp.proto.TelemetryConnectionSettings.certificate:type_name -> opamp.proto.TLSCertificate
-	22, // 32: opamp.proto.TelemetryConnectionSettings.tls:type_name -> opamp.proto.TLSConnectionSettings
-	23, // 33: opamp.proto.TelemetryConnectionSettings.proxy:type_name -> opamp.proto.ProxyConnectionSettings
-	24, // 34: opamp.proto.OtherConnectionSettings.headers:type_name -> opamp.proto.Headers
-	26, // 35: opamp.proto.OtherConnectionSettings.certificate:type_name -> opamp.proto.TLSCertificate
-	51, // 36: opamp.proto.OtherConnectionSettings.other_settings:type_name -> opamp.proto.OtherConnectionSettings.OtherSettingsEntry
-	22, // 37: opamp.proto.OtherConnectionSettings.tls:type_name -> opamp.proto.TLSConnectionSettings
-	23, // 38: opamp.proto.OtherConnectionSettings.proxy:type_name -> opamp.proto.ProxyConnectionSettings
-	24, // 39: opamp.proto.ProxyConnectionSettings.connect_headers:type_name -> opamp.proto.Headers
-	25, // 40: opamp.proto.Headers.headers:type_name -> opamp.proto.Header
-	19, // 41: opamp.proto.ConnectionSettingsOffers.opamp:type_name -> opamp.proto.OpAMPConnectionSettings
-	20, // 42: opamp.proto.ConnectionSettingsOffers.own_metrics:type_name -> opamp.proto.TelemetryConnectionSettings
-	20, // 43: opamp.proto.ConnectionSettingsOffers.own_traces:type_name -> opamp.proto.TelemetryConnectionSettings
-	20, // 44: opamp.proto.ConnectionSettingsOffers.own_logs:type_name -> opamp.proto.TelemetryConnectionSettings
-	52, // 45: opamp.proto.ConnectionSettingsOffers.other_connections:type_name -> opamp.proto.ConnectionSettingsOffers.OtherConnectionsEntry
-	53, // 46: opamp.proto.PackagesAvailable.packages:type_name -> opamp.proto.PackagesAvailable.PackagesEntry
+	49, // 13: opamp.proto.AvailableComponents.components:type_name -> opamp.proto.AvailableComponents.ComponentsEntry
+	58, // 14: opamp.proto.ComponentDetails.metadata:type_name -> opamp.proto.KeyValue
+	50, // 15: opamp.proto.ComponentDetails.sub_component_map:type_name -> opamp.proto.ComponentDetails.SubComponentMapEntry
+	32, // 16: opamp.proto.ServerToAgent.error_response:type_name -> opamp.proto.ServerErrorResponse
+	44, // 17: opamp.proto.ServerToAgent.remote_config:type_name -> opamp.proto.AgentRemoteConfig
+	28, // 18: opamp.proto.ServerToAgent.connection_settings:type_name -> opamp.proto.ConnectionSettingsOffers
+	29, // 19: opamp.proto.ServerToAgent.packages_available:type_name -> opamp.proto.PackagesAvailable
+	43, // 20: opamp.proto.ServerToAgent.agent_identification:type_name -> opamp.proto.AgentIdentification
+	34, // 21: opamp.proto.ServerToAgent.command:type_name -> opamp.proto.ServerToAgentCommand
+	47, // 22: opamp.proto.ServerToAgent.custom_capabilities:type_name -> opamp.proto.CustomCapabilities
+	48, // 23: opamp.proto.ServerToAgent.custom_message:type_name -> opamp.proto.CustomMessage
+	51, // 24: opamp.proto.TrustChainResponse.certificate_chain:type_name -> opamp.proto.TrustChainResponse.Certificate
+	18, // 25: opamp.proto.SignedServerToAgent.trust_chain_response:type_name -> opamp.proto.TrustChainResponse
+	25, // 26: opamp.proto.OpAMPConnectionSettings.headers:type_name -> opamp.proto.Headers
+	27, // 27: opamp.proto.OpAMPConnectionSettings.certificate:type_name -> opamp.proto.TLSCertificate
+	23, // 28: opamp.proto.OpAMPConnectionSettings.tls:type_name -> opamp.proto.TLSConnectionSettings
+	24, // 29: opamp.proto.OpAMPConnectionSettings.proxy:type_name -> opamp.proto.ProxyConnectionSettings
+	25, // 30: opamp.proto.TelemetryConnectionSettings.headers:type_name -> opamp.proto.Headers
+	27, // 31: opamp.proto.TelemetryConnectionSettings.certificate:type_name -> opamp.proto.TLSCertificate
+	23, // 32: opamp.proto.TelemetryConnectionSettings.tls:type_name -> opamp.proto.TLSConnectionSettings
+	24, // 33: opamp.proto.TelemetryConnectionSettings.proxy:type_name -> opamp.proto.ProxyConnectionSettings
+	25, // 34: opamp.proto.OtherConnectionSettings.headers:type_name -> opamp.proto.Headers
+	27, // 35: opamp.proto.OtherConnectionSettings.certificate:type_name -> opamp.proto.TLSCertificate
+	52, // 36: opamp.proto.OtherConnectionSettings.other_settings:type_name -> opamp.proto.OtherConnectionSettings.OtherSettingsEntry
+	23, // 37: opamp.proto.OtherConnectionSettings.tls:type_name -> opamp.proto.TLSConnectionSettings
+	24, // 38: opamp.proto.OtherConnectionSettings.proxy:type_name -> opamp.proto.ProxyConnectionSettings
+	25, // 39: opamp.proto.ProxyConnectionSettings.connect_headers:type_name -> opamp.proto.Headers
+	26, // 40: opamp.proto.Headers.headers:type_name -> opamp.proto.Header
+	20, // 41: opamp.proto.ConnectionSettingsOffers.opamp:type_name -> opamp.proto.OpAMPConnectionSettings
+	21, // 42: opamp.proto.ConnectionSettingsOffers.own_metrics:type_name -> opamp.proto.TelemetryConnectionSettings
+	21, // 43: opamp.proto.ConnectionSettingsOffers.own_traces:type_name -> opamp.proto.TelemetryConnectionSettings
+	21, // 44: opamp.proto.ConnectionSettingsOffers.own_logs:type_name -> opamp.proto.TelemetryConnectionSettings
+	53, // 45: opamp.proto.ConnectionSettingsOffers.other_connections:type_name -> opamp.proto.ConnectionSettingsOffers.OtherConnectionsEntry
+	54, // 46: opamp.proto.PackagesAvailable.packages:type_name -> opamp.proto.PackagesAvailable.PackagesEntry
 	3,  // 47: opamp.proto.PackageAvailable.type:type_name -> opamp.proto.PackageType
-	30, // 48: opamp.proto.PackageAvailable.file:type_name -> opamp.proto.DownloadableFile
-	24, // 49: opamp.proto.DownloadableFile.headers:type_name -> opamp.proto.Headers
+	31, // 48: opamp.proto.PackageAvailable.file:type_name -> opamp.proto.DownloadableFile
+	25, // 49: opamp.proto.DownloadableFile.headers:type_name -> opamp.proto.Headers
 	4,  // 50: opamp.proto.ServerErrorResponse.type:type_name -> opamp.proto.ServerErrorResponseType
-	32, // 51: opamp.proto.ServerErrorResponse.retry_info:type_name -> opamp.proto.RetryInfo
+	33, // 51: opamp.proto.ServerErrorResponse.retry_info:type_name -> opamp.proto.RetryInfo
 	5,  // 52: opamp.proto.ServerToAgentCommand.type:type_name -> opamp.proto.CommandType
-	57, // 53: opamp.proto.AgentDescription.identifying_attributes:type_name -> opamp.proto.KeyValue
-	57, // 54: opamp.proto.AgentDescription.non_identifying_attributes:type_name -> opamp.proto.KeyValue
-	54, // 55: opamp.proto.ComponentHealth.component_health_map:type_name -> opamp.proto.ComponentHealth.ComponentHealthMapEntry
-	44, // 56: opamp.proto.EffectiveConfig.config_map:type_name -> opamp.proto.AgentConfigMap
+	58, // 53: opamp.proto.AgentDescription.identifying_attributes:type_name -> opamp.proto.KeyValue
+	58, // 54: opamp.proto.AgentDescription.non_identifying_attributes:type_name -> opamp.proto.KeyValue
+	55, // 55: opamp.proto.ComponentHealth.component_health_map:type_name -> opamp.proto.ComponentHealth.ComponentHealthMapEntry
+	45, // 56: opamp.proto.EffectiveConfig.config_map:type_name -> opamp.proto.AgentConfigMap
 	8,  // 57: opamp.proto.RemoteConfigStatus.status:type_name -> opamp.proto.RemoteConfigStatuses
 	7,  // 58: opamp.proto.ConnectionSettingsStatus.status:type_name -> opamp.proto.ConnectionSettingsStatuses
-	55, // 59: opamp.proto.PackageStatuses.packages:type_name -> opamp.proto.PackageStatuses.PackagesEntry
+	56, // 59: opamp.proto.PackageStatuses.packages:type_name -> opamp.proto.PackageStatuses.PackagesEntry
 	9,  // 60: opamp.proto.PackageStatus.status:type_name -> opamp.proto.PackageStatusEnum
-	41, // 61: opamp.proto.PackageStatus.download_details:type_name -> opamp.proto.PackageDownloadDetails
-	44, // 62: opamp.proto.AgentRemoteConfig.config:type_name -> opamp.proto.AgentConfigMap
-	56, // 63: opamp.proto.AgentConfigMap.config_map:type_name -> opamp.proto.AgentConfigMap.ConfigMapEntry
+	42, // 61: opamp.proto.PackageStatus.download_details:type_name -> opamp.proto.PackageDownloadDetails
+	45, // 62: opamp.proto.AgentRemoteConfig.config:type_name -> opamp.proto.AgentConfigMap
+	57, // 63: opamp.proto.AgentConfigMap.config_map:type_name -> opamp.proto.AgentConfigMap.ConfigMapEntry
 	16, // 64: opamp.proto.AvailableComponents.ComponentsEntry.value:type_name -> opamp.proto.ComponentDetails
 	16, // 65: opamp.proto.ComponentDetails.SubComponentMapEntry.value:type_name -> opamp.proto.ComponentDetails
-	21, // 66: opamp.proto.ConnectionSettingsOffers.OtherConnectionsEntry.value:type_name -> opamp.proto.OtherConnectionSettings
-	29, // 67: opamp.proto.PackagesAvailable.PackagesEntry.value:type_name -> opamp.proto.PackageAvailable
-	35, // 68: opamp.proto.ComponentHealth.ComponentHealthMapEntry.value:type_name -> opamp.proto.ComponentHealth
-	40, // 69: opamp.proto.PackageStatuses.PackagesEntry.value:type_name -> opamp.proto.PackageStatus
-	45, // 70: opamp.proto.AgentConfigMap.ConfigMapEntry.value:type_name -> opamp.proto.AgentConfigFile
+	22, // 66: opamp.proto.ConnectionSettingsOffers.OtherConnectionsEntry.value:type_name -> opamp.proto.OtherConnectionSettings
+	30, // 67: opamp.proto.PackagesAvailable.PackagesEntry.value:type_name -> opamp.proto.PackageAvailable
+	36, // 68: opamp.proto.ComponentHealth.ComponentHealthMapEntry.value:type_name -> opamp.proto.ComponentHealth
+	41, // 69: opamp.proto.PackageStatuses.PackagesEntry.value:type_name -> opamp.proto.PackageStatus
+	46, // 70: opamp.proto.AgentConfigMap.ConfigMapEntry.value:type_name -> opamp.proto.AgentConfigFile
 	71, // [71:71] is the sub-list for method output_type
 	71, // [71:71] is the sub-list for method input_type
 	71, // [71:71] is the sub-list for extension type_name
@@ -4109,7 +4172,7 @@ func file_opamp_proto_init() {
 		return
 	}
 	file_anyvalue_proto_init()
-	file_opamp_proto_msgTypes[21].OneofWrappers = []any{
+	file_opamp_proto_msgTypes[22].OneofWrappers = []any{
 		(*ServerErrorResponse_RetryInfo)(nil),
 	}
 	type x struct{}
@@ -4118,7 +4181,7 @@ func file_opamp_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_opamp_proto_rawDesc), len(file_opamp_proto_rawDesc)),
 			NumEnums:      10,
-			NumMessages:   47,
+			NumMessages:   48,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
