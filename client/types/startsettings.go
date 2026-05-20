@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/open-telemetry/opamp-go/protobufs"
+	"github.com/open-telemetry/opamp-go/signing"
 )
 
 // StartSettings defines the parameters for starting the OpAMP Client.
@@ -52,6 +53,21 @@ type StartSettings struct {
 	// If nil then ReportsPackageStatuses and AcceptsPackages capabilities will be disabled,
 	// i.e. package status reporting and syncing from the Server will be disabled.
 	PackagesStateProvider PackagesStateProvider
+
+	// PayloadVerifier validates the X.509 trust chain delivered in the
+	// initial SignedServerToAgent.trust_chain_response of a connection
+	// and verifies the detached signature on every subsequent
+	// ServerToAgent message. MUST be set when the Agent's capability
+	// set includes
+	// AgentCapabilities_RequiresPayloadTrustVerification. When nil
+	// (the default), payload trust verification is disabled and the
+	// Server-to-Agent wire format is the standard ServerToAgent
+	// protobuf — identical to upstream OpAMP.
+	//
+	// See the signing package for the in-process LocalVerifier
+	// implementation and the VerifierFromFile helper that constructs
+	// one from a PEM-encoded CA bundle.
+	PayloadVerifier signing.Verifier
 
 	// Defines the capabilities of the Agent. AgentCapabilities_ReportsStatus bit does not need to
 	// be set in this field, it will be set automatically since it is required by OpAMP protocol.

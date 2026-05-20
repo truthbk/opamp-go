@@ -401,6 +401,7 @@ func (c *wsClient) runOneCycle(ctx context.Context, sendFirstMessage bool) {
 		c.common.PackagesStateProvider,
 		&c.common.PackageSyncMutex,
 		c.common.DownloadReporterInterval,
+		c.common.PayloadVerifier,
 	)
 
 	// When the wsclient is closed, the context passed to runOneCycle will be canceled.

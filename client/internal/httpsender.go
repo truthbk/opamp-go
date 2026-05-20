@@ -22,6 +22,7 @@ import (
 	"github.com/open-telemetry/opamp-go/client/types"
 	"github.com/open-telemetry/opamp-go/internal"
 	"github.com/open-telemetry/opamp-go/protobufs"
+	"github.com/open-telemetry/opamp-go/signing"
 )
 
 const (
@@ -70,6 +71,12 @@ type HTTPSender struct {
 
 	// Processor to handle received messages.
 	receiveProcessor receivedProcessor
+
+	// attestation, when non-nil, decodes inbound responses as
+	// SignedServerToAgent envelopes — validates the trust chain on the
+	// first response and verifies the signature on every subsequent
+	// one. Set by Run when the StartSettings supplied a PayloadVerifier.
+	attestation *attestationState
 }
 
 // NewHTTPSender creates a new Sender that uses HTTP to send messages
@@ -129,10 +136,14 @@ func (h *HTTPSender) Run(
 	packagesStateProvider types.PackagesStateProvider,
 	packageSyncMutex *sync.Mutex,
 	reporterInterval time.Duration,
+	payloadVerifier signing.Verifier,
 ) {
 	h.url = url
 	h.callbacks = callbacks
 	h.receiveProcessor = newReceivedProcessor(h.logger, callbacks, h, clientSyncedState, packagesStateProvider, packageSyncMutex, reporterInterval)
+	if payloadVerifier != nil {
+		h.attestation = newAttestationState(payloadVerifier)
+	}
 
 	// we need to detect if the redirect was ever set, if not, we want default behaviour
 	if callbacks.CheckRedirect != nil {
@@ -373,7 +384,14 @@ func (h *HTTPSender) receiveResponse(ctx context.Context, resp *http.Response) {
 	_ = resp.Body.Close()
 
 	var response protobufs.ServerToAgent
-	if err := proto.Unmarshal(msgBytes, &response); err != nil {
+	if err := unwrapServerToAgent(ctx, h.attestation, msgBytes, &response); err != nil {
+		// When payload trust verification is enabled, a failure here
+		// means the response cannot be trusted; the spec says the
+		// connection MUST be terminated. For HTTP polling the agent
+		// has no persistent connection to drop — surface the error
+		// via the logger and skip processing this response. The next
+		// poll will re-establish state with the server, including a
+		// fresh trust-chain handshake.
 		h.logger.Errorf(ctx, "cannot unmarshal response: %v", err)
 		return
 	}

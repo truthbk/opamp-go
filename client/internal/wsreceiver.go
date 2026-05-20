@@ -10,6 +10,7 @@ import (
 	"github.com/open-telemetry/opamp-go/client/types"
 	"github.com/open-telemetry/opamp-go/internal"
 	"github.com/open-telemetry/opamp-go/protobufs"
+	"github.com/open-telemetry/opamp-go/signing"
 )
 
 // wsReceiver implements the WebSocket client's receiving portion of OpAMP protocol.
@@ -20,12 +21,24 @@ type wsReceiver struct {
 	callbacks types.Callbacks
 	processor receivedProcessor
 
+	// attestation, when non-nil, decodes inbound messages as
+	// SignedServerToAgent envelopes, validates the trust chain on the
+	// first message, verifies the signature on subsequent ones, and
+	// surfaces the inner ServerToAgent for normal processing.
+	attestation *attestationState
+
 	// Indicates that the receiver has fully stopped.
 	stopped chan struct{}
 }
 
 // NewWSReceiver creates a new Receiver that uses WebSocket to receive
-// messages from the server.
+// messages from the server. If payloadVerifier is non-nil, every
+// inbound message is treated as a SignedServerToAgent envelope: the
+// trust chain is validated on the first message, signatures are
+// verified on every subsequent one, and any failure terminates the
+// receive loop (and, by extension, the connection). When
+// payloadVerifier is nil, the receiver uses the standard ServerToAgent
+// wire format (identical to upstream OpAMP).
 func NewWSReceiver(
 	logger types.Logger,
 	callbacks types.Callbacks,
@@ -35,6 +48,7 @@ func NewWSReceiver(
 	packagesStateProvider types.PackagesStateProvider,
 	packageSyncMutex *sync.Mutex,
 	reporterInterval time.Duration,
+	payloadVerifier signing.Verifier,
 ) *wsReceiver {
 	w := &wsReceiver{
 		conn:      conn,
@@ -43,6 +57,9 @@ func NewWSReceiver(
 		callbacks: callbacks,
 		processor: newReceivedProcessor(logger, callbacks, sender, clientSyncedState, packagesStateProvider, packageSyncMutex, reporterInterval),
 		stopped:   make(chan struct{}),
+	}
+	if payloadVerifier != nil {
+		w.attestation = newAttestationState(payloadVerifier)
 	}
 
 	return w
@@ -78,7 +95,7 @@ func (r *wsReceiver) ReceiverLoop(ctx context.Context) {
 			// To stop this goroutine, close the websocket connection
 			go func() {
 				var message protobufs.ServerToAgent
-				err := r.receiveMessage(&message)
+				err := r.receiveMessage(ctx, &message)
 				result <- receivedMessage{&message, err}
 			}()
 
@@ -98,7 +115,7 @@ func (r *wsReceiver) ReceiverLoop(ctx context.Context) {
 	}
 }
 
-func (r *wsReceiver) receiveMessage(msg *protobufs.ServerToAgent) error {
+func (r *wsReceiver) receiveMessage(ctx context.Context, msg *protobufs.ServerToAgent) error {
 	mt, bytes, err := r.conn.ReadMessage()
 	if err != nil {
 		return err
@@ -106,9 +123,12 @@ func (r *wsReceiver) receiveMessage(msg *protobufs.ServerToAgent) error {
 	if mt != websocket.BinaryMessage {
 		return fmt.Errorf("unsupported message type: %v", mt)
 	}
-	err = internal.DecodeWSMessage(bytes, msg)
+	protoBytes, err := internal.StripWSMessageHeader(bytes)
 	if err != nil {
 		return fmt.Errorf("cannot decode received message: %w", err)
 	}
-	return err
+	if err := unwrapServerToAgent(ctx, r.attestation, protoBytes, msg); err != nil {
+		return fmt.Errorf("cannot decode received message: %w", err)
+	}
+	return nil
 }
