@@ -388,11 +388,18 @@ func (h *HTTPSender) receiveResponse(ctx context.Context, resp *http.Response) {
 		// When payload trust verification is enabled, a failure here
 		// means the response cannot be trusted; the spec says the
 		// connection MUST be terminated. For HTTP polling the agent
-		// has no persistent connection to drop — surface the error
-		// via the logger and skip processing this response. The next
-		// poll will re-establish state with the server, including a
-		// fresh trust-chain handshake.
+		// has no persistent connection to drop, so we skip processing
+		// this response and Reset the per-connection attestation
+		// state. The next poll will re-attempt the trust-chain
+		// handshake, allowing the Agent to recover from mid-stream
+		// faults such as server-side key rotation. Without the Reset,
+		// the cached firstSeen flag would keep us in the "verify
+		// signature" branch and the Agent could be stuck rejecting
+		// every subsequent response.
 		h.logger.Errorf(ctx, "cannot unmarshal response: %v", err)
+		if h.attestation != nil {
+			h.attestation.Reset()
+		}
 		return
 	}
 

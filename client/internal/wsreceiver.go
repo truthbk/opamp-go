@@ -104,6 +104,24 @@ func (r *wsReceiver) ReceiverLoop(ctx context.Context) {
 				return
 			case res := <-result:
 				if res.err != nil {
+					if isAttestationFailure(res.err) {
+						// Per the Message Attestation spec, the Agent
+						// MUST terminate the connection on any
+						// payload-trust verification failure.
+						// Returning here ends the receive loop, but
+						// the sender goroutine might still write
+						// pending AgentToServer messages on the same
+						// conn until the wsclient owner observes the
+						// stopped signal and closes; eagerly closing
+						// the conn here prevents that small leak
+						// window of agent messages to an untrusted
+						// server.
+						r.logger.Errorf(ctx, "Payload trust verification failed; terminating connection: %v", res.err)
+						if r.conn != nil {
+							_ = r.conn.Close()
+						}
+						return
+					}
 					if !websocket.IsCloseError(res.err, websocket.CloseNormalClosure) {
 						r.logger.Errorf(ctx, "Unexpected error while receiving: %v", res.err)
 					}

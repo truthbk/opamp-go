@@ -3,6 +3,8 @@ package internal
 import (
 	"context"
 	"crypto/x509"
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -294,4 +296,69 @@ func TestUnwrapServerToAgent_WithState_GarbageBytes(t *testing.T) {
 	// forgiving but completely random bytes typically still fail.
 	err := unwrapServerToAgent(context.Background(), state, []byte{0xff, 0xfe, 0xfd, 0xfc}, &msg)
 	require.Error(t, err)
+}
+
+// TestAttestationState_Reset confirms that Reset() returns the state
+// to its initial (handshake-pending) form. The use case is the HTTP
+// polling transport, which lacks a persistent connection to drop on
+// attestation failure and must be able to re-handshake on the next
+// poll.
+func TestAttestationState_Reset(t *testing.T) {
+	f := newAttestationFixture(t)
+	state := newAttestationState(f.verifier)
+	ctx := context.Background()
+
+	// Drive the state through a successful handshake.
+	first := &protobufs.ServerToAgent{InstanceUid: []byte("first00000000000")}
+	_, err := state.ProcessEnvelope(ctx, f.buildFirstEnvelope(t, first, false))
+	require.NoError(t, err)
+	require.True(t, state.firstSeen)
+	require.NotNil(t, state.leaf)
+
+	// Reset and confirm the state is handshake-pending again.
+	state.Reset()
+	require.False(t, state.firstSeen)
+	require.Nil(t, state.leaf)
+
+	// A "next" envelope without trust_chain_response now produces
+	// ErrMissingTrustChain (rather than ErrMissingSignature), proving
+	// the state is back to first-message semantics.
+	second := &protobufs.ServerToAgent{InstanceUid: []byte("second0000000000")}
+	envWithoutChain := f.buildSignedEnvelope(t, second)
+	envWithoutChain.TrustChainResponse = nil
+
+	_, err = state.ProcessEnvelope(ctx, envWithoutChain)
+	require.ErrorIs(t, err, ErrMissingTrustChain)
+
+	// A fresh first-message envelope succeeds after Reset.
+	thirdEnv := f.buildFirstEnvelope(t, second, false)
+	_, err = state.ProcessEnvelope(ctx, thirdEnv)
+	require.NoError(t, err)
+}
+
+// TestIsAttestationFailure_ClassifiesSentinels confirms the
+// classification helper used by the WS receive loop to decide when to
+// close the connection.
+func TestIsAttestationFailure_ClassifiesSentinels(t *testing.T) {
+	require.False(t, isAttestationFailure(nil))
+
+	// Local attestation sentinels.
+	require.True(t, isAttestationFailure(ErrMissingTrustChain))
+	require.True(t, isAttestationFailure(ErrTrustChainErrorReported))
+	require.True(t, isAttestationFailure(ErrMissingSignature))
+	require.True(t, isAttestationFailure(ErrMissingPayload))
+
+	// Signing-package sentinels propagated up.
+	require.True(t, isAttestationFailure(signing.ErrChainValidation))
+	require.True(t, isAttestationFailure(signing.ErrSignatureMismatch))
+	require.True(t, isAttestationFailure(signing.ErrEmptyChain))
+	require.True(t, isAttestationFailure(signing.ErrParseCertificate))
+	require.True(t, isAttestationFailure(signing.ErrUnsupportedAlgorithm))
+
+	// Wrapped errors still classify correctly (errors.Is chain).
+	wrapped := fmt.Errorf("client: validate trust chain: %w", signing.ErrChainValidation)
+	require.True(t, isAttestationFailure(wrapped))
+
+	// Generic transport errors do NOT classify as attestation failures.
+	require.False(t, isAttestationFailure(errors.New("read: connection reset")))
 }

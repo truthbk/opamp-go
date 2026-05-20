@@ -64,6 +64,44 @@ func newAttestationState(verifier signing.Verifier) *attestationState {
 	return &attestationState{verifier: verifier}
 }
 
+// Reset clears the per-connection handshake state. After Reset, the
+// next call to ProcessEnvelope is treated as if it were the first
+// message on the connection — requiring trust_chain_response and
+// performing a fresh chain validation.
+//
+// Used by transports that lack a persistent connection (the HTTP
+// polling transport) to recover from server-side key rotation or
+// other mid-stream handshake faults. WebSocket callers do not need
+// to call Reset because a failure terminates the connection and the
+// next reconnect attempt constructs a new attestationState.
+func (s *attestationState) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.firstSeen = false
+	s.leaf = nil
+}
+
+// isAttestationFailure reports whether err originated from a payload
+// trust verification problem (envelope malformed, chain validation
+// failed, signature missing or invalid, etc.). Used by the WebSocket
+// receive loop to distinguish attestation failures — which require
+// explicit connection termination per the spec — from generic
+// transport-level errors.
+func isAttestationFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, ErrMissingTrustChain) ||
+		errors.Is(err, ErrTrustChainErrorReported) ||
+		errors.Is(err, ErrMissingSignature) ||
+		errors.Is(err, ErrMissingPayload) ||
+		errors.Is(err, signing.ErrChainValidation) ||
+		errors.Is(err, signing.ErrSignatureMismatch) ||
+		errors.Is(err, signing.ErrEmptyChain) ||
+		errors.Is(err, signing.ErrParseCertificate) ||
+		errors.Is(err, signing.ErrUnsupportedAlgorithm)
+}
+
 // ProcessEnvelope handles an incoming SignedServerToAgent received on
 // this connection. On the first call, the envelope's certificate
 // chain is validated against the verifier's pre-configured trust
