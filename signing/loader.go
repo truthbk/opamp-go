@@ -2,9 +2,6 @@ package signing
 
 import (
 	"crypto"
-	"crypto/ecdsa"
-	"crypto/ed25519"
-	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
@@ -92,24 +89,26 @@ func parsePrivateKeyPEM(data []byte) (crypto.Signer, error) {
 	if block == nil {
 		return nil, fmt.Errorf("%w: no PEM block found", ErrParsePrivateKey)
 	}
-	// Try PKCS#8 first (covers RSA, ECDSA, Ed25519).
+	// PKCS#8 first — covers RSA, ECDSA, and Ed25519 in one call. If it
+	// succeeds, we accept any key type that implements crypto.Signer
+	// (which all current and likely-future stdlib private-key types
+	// do).
 	if k, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
-		switch t := k.(type) {
-		case *rsa.PrivateKey, *ecdsa.PrivateKey, ed25519.PrivateKey:
-			return t.(crypto.Signer), nil
-		default:
-			return nil, fmt.Errorf("%w: PKCS#8 key type %T does not implement crypto.Signer", ErrParsePrivateKey, t)
+		s, ok := k.(crypto.Signer)
+		if !ok {
+			return nil, fmt.Errorf("%w: PKCS#8 key type %T does not implement crypto.Signer", ErrParsePrivateKey, k)
 		}
+		return s, nil
 	}
-	// Then EC-specific (PKCS#1-like) for ECDSA keys.
-	if k, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
-		return k, nil
-	}
-	// Then PKCS#1 for RSA.
+	// PKCS#1 for legacy RSA private keys.
 	if k, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
 		return k, nil
 	}
-	return nil, fmt.Errorf("%w: tried PKCS#8, EC, PKCS#1 — none matched", ErrParsePrivateKey)
+	// EC for legacy ECDSA private keys.
+	if k, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+		return k, nil
+	}
+	return nil, fmt.Errorf("%w: tried PKCS#8, PKCS#1, EC — none matched", ErrParsePrivateKey)
 }
 
 func parseCertChainPEM(data []byte) ([]*x509.Certificate, error) {

@@ -4,6 +4,7 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -13,26 +14,80 @@ import (
 	"fmt"
 )
 
-// ErrUnsupportedAlgorithm indicates that a certificate's
-// SignatureAlgorithm is not in the supported set, or that the
-// public/private key type does not match the requested algorithm.
+// rsaMinModulusBits is the minimum acceptable RSA modulus size. Keys
+// below this size are rejected even if the rest of the chain validates.
+const rsaMinModulusBits = 2048
+
+// ErrUnsupportedAlgorithm indicates that a certificate's public key
+// (or the algorithm declared by the issuer's signature on the cert)
+// is not in the supported set: it is the wrong key type, an
+// unsupported ECDSA curve, an RSA key below rsaMinModulusBits, or the
+// declared SignatureAlgorithm does not match the leaf's actual key
+// type/curve.
 var ErrUnsupportedAlgorithm = errors.New("signing: unsupported signature algorithm")
 
-// algorithmFromCert maps x509.Certificate.SignatureAlgorithm to the
-// package's Algorithm enum, returning ErrUnsupportedAlgorithm for any
-// value outside the supported baseline.
+// algorithmFromCert derives the Algorithm to use for signature
+// operations involving cert. Dispatching on the leaf's own public key
+// type (rather than on cert.SignatureAlgorithm, which describes the
+// issuer's signing of the cert itself) is the correct authority: the
+// Algorithm controls how a payload is signed/verified, and that has to
+// match the leaf key's algorithm and curve, not the issuer's.
+//
+// The function additionally cross-checks cert.SignatureAlgorithm
+// against the leaf key so that a certificate whose declared algorithm
+// is inconsistent with its pubkey is rejected up front. This prevents
+// a within-family mismatch (e.g., a P-384 CA issuing a P-256 leaf with
+// SignatureAlgorithm=ECDSAWithSHA384) from silently accepting the
+// wrong hash size at sign/verify time.
+//
+// Minimum RSA modulus is rsaMinModulusBits.
 func algorithmFromCert(cert *x509.Certificate) (Algorithm, error) {
-	switch cert.SignatureAlgorithm {
-	case x509.ECDSAWithSHA256:
-		return AlgorithmECDSAP256SHA256, nil
-	case x509.ECDSAWithSHA384:
-		return AlgorithmECDSAP384SHA384, nil
-	case x509.SHA256WithRSA:
+	switch pub := cert.PublicKey.(type) {
+	case *ecdsa.PublicKey:
+		switch pub.Curve {
+		case elliptic.P256():
+			if cert.SignatureAlgorithm != x509.ECDSAWithSHA256 {
+				return AlgorithmUnspecified, fmt.Errorf("%w: P-256 leaf with mismatched declared algorithm %s",
+					ErrUnsupportedAlgorithm, cert.SignatureAlgorithm)
+			}
+			return AlgorithmECDSAP256SHA256, nil
+		case elliptic.P384():
+			if cert.SignatureAlgorithm != x509.ECDSAWithSHA384 {
+				return AlgorithmUnspecified, fmt.Errorf("%w: P-384 leaf with mismatched declared algorithm %s",
+					ErrUnsupportedAlgorithm, cert.SignatureAlgorithm)
+			}
+			return AlgorithmECDSAP384SHA384, nil
+		default:
+			curveName := "unknown"
+			if pub.Curve != nil && pub.Curve.Params() != nil {
+				curveName = pub.Curve.Params().Name
+			}
+			return AlgorithmUnspecified, fmt.Errorf("%w: unsupported ECDSA curve %s",
+				ErrUnsupportedAlgorithm, curveName)
+		}
+	case *rsa.PublicKey:
+		if pub.N == nil || pub.N.BitLen() < rsaMinModulusBits {
+			bits := 0
+			if pub.N != nil {
+				bits = pub.N.BitLen()
+			}
+			return AlgorithmUnspecified, fmt.Errorf("%w: RSA key %d bits < %d",
+				ErrUnsupportedAlgorithm, bits, rsaMinModulusBits)
+		}
+		if cert.SignatureAlgorithm != x509.SHA256WithRSA {
+			return AlgorithmUnspecified, fmt.Errorf("%w: RSA leaf with mismatched declared algorithm %s",
+				ErrUnsupportedAlgorithm, cert.SignatureAlgorithm)
+		}
 		return AlgorithmRSAPKCS1v15SHA256, nil
-	case x509.PureEd25519:
+	case ed25519.PublicKey:
+		if cert.SignatureAlgorithm != x509.PureEd25519 {
+			return AlgorithmUnspecified, fmt.Errorf("%w: Ed25519 leaf with mismatched declared algorithm %s",
+				ErrUnsupportedAlgorithm, cert.SignatureAlgorithm)
+		}
 		return AlgorithmEd25519, nil
 	default:
-		return AlgorithmUnspecified, fmt.Errorf("%w: %s", ErrUnsupportedAlgorithm, cert.SignatureAlgorithm)
+		return AlgorithmUnspecified, fmt.Errorf("%w: unsupported public key type %T",
+			ErrUnsupportedAlgorithm, pub)
 	}
 }
 
