@@ -259,6 +259,11 @@ func (s *server) handleWSConnection(reqCtx context.Context, wsConn *websocket.Co
 	connectionCallbacks.OnConnected(reqCtx, agentConn)
 
 	sentCustomCapabilities := false
+	// signingNegotiated tracks whether we've already inspected the
+	// Agent's capabilities for this connection. The handshake is
+	// driven by the first AgentToServer's capabilities; subsequent
+	// messages don't re-negotiate.
+	signingNegotiated := false
 
 	// Loop until fail to read from the WebSocket connection.
 	for {
@@ -301,6 +306,25 @@ func (s *server) handleWSConnection(reqCtx context.Context, wsConn *websocket.Co
 			continue
 		}
 
+		// On the first AgentToServer of this connection, decide
+		// whether payload trust verification is negotiated. The Agent
+		// declares its requirement via capabilities; the Server has
+		// to have a configured PayloadSigner. If both line up, snapshot
+		// the chain and attach a signing state to the connection so
+		// subsequent Sends wrap their messages in a SignedServerToAgent
+		// envelope.
+		if !signingNegotiated {
+			signingNegotiated = true
+			if s.settings.PayloadSigner != nil && agentRequiresAttestation(request.Capabilities) {
+				state, err := newConnectionSigningState(msgContext, s.settings.PayloadSigner)
+				if err != nil {
+					s.logger.Errorf(msgContext, "Cannot fetch signing certificate chain: %v", err)
+					break
+				}
+				agentConn.enableSigning(state)
+			}
+		}
+
 		response := connectionCallbacks.OnMessage(msgContext, agentConn, &request)
 		if response == nil { // No send message when 'response' is empty
 			continue
@@ -314,6 +338,12 @@ func (s *server) handleWSConnection(reqCtx context.Context, wsConn *websocket.Co
 				Capabilities: s.settings.CustomCapabilities,
 			}
 			sentCustomCapabilities = true
+		}
+		// Auto-advertise OffersPayloadTrustVerification when this
+		// connection has signing enabled. The Agent inspects this bit
+		// on the first ServerToAgent.
+		if agentConn.signing != nil {
+			response.Capabilities = addOffersAttestationBit(response.Capabilities)
 		}
 
 		err = agentConn.Send(msgContext, response)
@@ -415,8 +445,32 @@ func (s *server) handlePlainHTTPRequest(req *http.Request, w http.ResponseWriter
 		Capabilities: s.settings.CustomCapabilities,
 	}
 
-	// Marshal the response.
-	bodyBytes, err = proto.Marshal(response)
+	// Payload trust verification (HTTP path). HTTP is request-response
+	// with no persistent connection, so the trust handshake happens
+	// per-response: every signed response carries the chain alongside
+	// the signature. The Agent's HTTP receive path is stateful across
+	// polls (see client/internal/attestation.go) but tolerates the
+	// chain being re-sent — it just ignores it after the first.
+	var responseMessage proto.Message = response
+	if s.settings.PayloadSigner != nil && agentRequiresAttestation(request.Capabilities) {
+		response.Capabilities = addOffersAttestationBit(response.Capabilities)
+		state, sigErr := newConnectionSigningState(req.Context(), s.settings.PayloadSigner)
+		if sigErr != nil {
+			s.logger.Errorf(req.Context(), "Cannot fetch signing certificate chain: %v", sigErr)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		envelope, sigErr := state.signOutgoing(req.Context(), response)
+		if sigErr != nil {
+			s.logger.Errorf(req.Context(), "Cannot sign HTTP response: %v", sigErr)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		responseMessage = envelope
+	}
+
+	// Marshal the response (or its envelope).
+	bodyBytes, err = proto.Marshal(responseMessage)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return

@@ -21,21 +21,43 @@ type wsConnection struct {
 	connMutex sync.Mutex
 	wsConn    *websocket.Conn
 	closed    atomic.Bool
+
+	// signing, when non-nil, indicates that this connection has
+	// negotiated payload trust verification with the Agent. Outbound
+	// ServerToAgent messages are wrapped in a SignedServerToAgent
+	// envelope and the first send carries the trust chain.
+	signing *connectionSigningState
 }
 
 var _ types.Connection = (*wsConnection)(nil)
 
-func newWSConnection(wsConn *websocket.Conn) types.Connection {
+func newWSConnection(wsConn *websocket.Conn) *wsConnection {
 	return &wsConnection{wsConn: wsConn}
+}
+
+// enableSigning marks this connection as one that has negotiated
+// payload trust verification. Outbound Send calls will wrap their
+// ServerToAgent argument in a SignedServerToAgent envelope using the
+// supplied state. Must be called before the first Send.
+func (c *wsConnection) enableSigning(state *connectionSigningState) {
+	c.signing = state
 }
 
 func (c *wsConnection) Connection() net.Conn {
 	return c.wsConn.UnderlyingConn()
 }
 
-func (c *wsConnection) Send(_ context.Context, message *protobufs.ServerToAgent) error {
+func (c *wsConnection) Send(ctx context.Context, message *protobufs.ServerToAgent) error {
 	c.connMutex.Lock()
 	defer c.connMutex.Unlock()
+
+	if c.signing != nil {
+		env, err := c.signing.signOutgoing(ctx, message)
+		if err != nil {
+			return err
+		}
+		return internal.WriteWSMessage(c.wsConn, env)
+	}
 
 	return internal.WriteWSMessage(c.wsConn, message)
 }
