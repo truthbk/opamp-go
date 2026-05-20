@@ -42,10 +42,13 @@ func (v *LocalVerifier) ValidateChain(ctx context.Context, chainDER [][]byte, no
 	return ValidateChain(ctx, chainDER, v.roots, now)
 }
 
-// Verify implements [Verifier]. The algorithm is derived from
-// leaf.SignatureAlgorithm; ErrUnsupportedAlgorithm is returned for any
-// algorithm outside the supported baseline. ErrSignatureMismatch is
-// returned when the signature does not verify.
+// Verify implements [Verifier]. The signature algorithm is derived
+// from the leaf certificate's public-key type and (for ECDSA) curve,
+// cross-checked against leaf.SignatureAlgorithm.
+// ErrUnsupportedAlgorithm is returned for any pubkey type/curve
+// outside the supported baseline (or when leaf.SignatureAlgorithm
+// disagrees with the actual key). ErrSignatureMismatch is returned
+// when the signature does not verify.
 func (v *LocalVerifier) Verify(ctx context.Context, payload, signature []byte, leaf *x509.Certificate) error {
 	if err := ctx.Err(); err != nil {
 		return err

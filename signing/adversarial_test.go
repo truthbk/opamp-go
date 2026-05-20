@@ -9,10 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	"errors"
 	"math/big"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -88,14 +85,10 @@ func TestVerify_AlgorithmFamilyMismatch(t *testing.T) {
 
 	// ECDSA signature, RSA leaf → must reject. Verifier dispatches on
 	// the RSA leaf's pubkey type, so we end up in the RSA branch trying
-	// to verify ECDSA-DER bytes as a PKCS#1 v1.5 signature.
+	// to verify ECDSA-DER bytes as a PKCS#1 v1.5 signature, which
+	// always returns ErrSignatureMismatch.
 	err = verifier.Verify(ctx, payload, ecSig, leafRsa)
-	require.Error(t, err)
-	// Either ErrSignatureMismatch (verify failed) or
-	// ErrUnsupportedAlgorithm — anything but success.
-	require.True(t,
-		errors.Is(err, ErrSignatureMismatch) || errors.Is(err, ErrUnsupportedAlgorithm),
-		"expected mismatch or unsupported, got %v", err)
+	require.ErrorIs(t, err, ErrSignatureMismatch)
 }
 
 // TestWrongChainOrder_DetectedAtSignatureVerify documents how the
@@ -226,8 +219,8 @@ func TestNewLocalSigner_LeafPublicKeyMismatchDetected(t *testing.T) {
 }
 
 // TestParseCertChainPEM_IgnoresNonCertificateBlocks confirms that a
-// chain file with stray PEM blocks (e.g. a private key accidentally
-// left in the chain bundle) is parsed correctly — non-CERTIFICATE
+// chain bundle with stray PEM blocks (e.g. a private key accidentally
+// left in the chain file) is parsed correctly — non-CERTIFICATE
 // blocks are skipped, and the certificates that ARE present load.
 func TestParseCertChainPEM_IgnoresNonCertificateBlocks(t *testing.T) {
 	ca, caKey, err := GenerateCA(AlgorithmECDSAP256SHA256, CertOptions{})
@@ -235,19 +228,15 @@ func TestParseCertChainPEM_IgnoresNonCertificateBlocks(t *testing.T) {
 	leaf, _, err := GenerateLeaf(AlgorithmECDSAP256SHA256, ca, caKey, CertOptions{})
 	require.NoError(t, err)
 
-	// Build a "chain" file with an arbitrary non-CERTIFICATE block
-	// between the (only) leaf certificate and the end.
+	// Build a chain bundle with an arbitrary non-CERTIFICATE block
+	// (the realistic mis-bundling: an operator pastes a PRIVATE KEY
+	// block into the chain file). Use the CA's actual PKCS#8 key
+	// bytes so the junk block is well-formed PEM, not random bytes.
 	leafPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw})
-	junkPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: []byte{0x00, 0x01, 0x02}})
-	combined := append(append([]byte{}, leafPEM...), junkPEM...)
-
-	dir := t.TempDir()
-	chainPath := filepath.Join(dir, "chain.pem")
-	require.NoError(t, os.WriteFile(chainPath, combined, 0o600))
-
 	keyDER, err := x509.MarshalPKCS8PrivateKey(caKey)
 	require.NoError(t, err)
-	_ = keyDER
+	junkPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	combined := append(append([]byte{}, leafPEM...), junkPEM...)
 
 	chain, err := parseCertChainPEM(combined)
 	require.NoError(t, err)

@@ -39,9 +39,12 @@ type LocalSigner struct {
 // NOT be included — the Agent supplies the root via its pre-configured
 // trust anchor pool.
 //
-// The algorithm is determined by the leaf certificate's
-// SignatureAlgorithm; ErrUnsupportedAlgorithm is returned for any
-// value outside the supported baseline.
+// The signing algorithm is determined by the leaf certificate's public
+// key type and (for ECDSA) curve, cross-checked against the cert's
+// SignatureAlgorithm field. ErrUnsupportedAlgorithm is returned for
+// any pubkey type/curve outside the supported baseline, for RSA keys
+// below the minimum modulus (rsaMinModulusBits), or when
+// SignatureAlgorithm does not match the leaf's actual key.
 func NewLocalSigner(key crypto.Signer, chain []*x509.Certificate) (*LocalSigner, error) {
 	if key == nil {
 		return nil, ErrNilKey

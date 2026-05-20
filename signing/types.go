@@ -117,8 +117,10 @@ type Verifier interface {
 	ValidateChain(ctx context.Context, chainDER [][]byte, now time.Time) (*x509.Certificate, error)
 
 	// Verify validates signature over payload using the public key of
-	// leaf and the algorithm declared by leaf.SignatureAlgorithm. The
-	// payload bytes are the wire bytes of SignedServerToAgent.payload
-	// — the receiver does not re-marshal anything.
+	// leaf. The signature algorithm is derived from leaf's public-key
+	// type and (for ECDSA) curve, cross-checked against
+	// leaf.SignatureAlgorithm. The payload bytes are the wire bytes of
+	// SignedServerToAgent.payload — the receiver does not re-marshal
+	// anything.
 	Verify(ctx context.Context, payload, signature []byte, leaf *x509.Certificate) error
 }
