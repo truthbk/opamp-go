@@ -27,17 +27,26 @@ import (
 
 const (
 	// e2eDeadline bounds how long a happy-path observation may take.
-	// Generous so RSA key generation on slow CI doesn't flake.
-	e2eDeadline = 5 * time.Second
+	// 15s is generous — under -race × parallel CPU contention, the
+	// first-envelope round trip can run several seconds on slow CI,
+	// and RSA-2048 key generation in newFixture is on the same clock.
+	// We'd rather wait than flake.
+	e2eDeadline = 15 * time.Second
 	// e2eNonOccurrenceDeadline bounds the wait for a "this should NOT
 	// happen" assertion (reject scenarios assert OnMessage never
-	// fires). Tradeoff: too short hides slow paths; too long slows the
-	// suite. 750ms catches anything that would have happened on a
-	// healthy local box.
-	e2eNonOccurrenceDeadline = 750 * time.Millisecond
+	// fires). One GC pause under -race can eat several hundred
+	// milliseconds; 1.5s catches anything that would have happened on
+	// a healthy box without making the suite slow.
+	e2eNonOccurrenceDeadline = 1500 * time.Millisecond
 	// listenPath is shared by all e2e tests; ws/http URL building
 	// concatenates it to the dialed endpoint.
 	listenPath = "/v1/opamp"
+
+	// attestationFailureLogSubstring is the canonical phrase the
+	// client logs on any payload trust verification failure (both WS
+	// and HTTP transports). Tests grep for this exact substring; if
+	// you change it on the receive paths, update both ends.
+	attestationFailureLogSubstring = "Payload trust verification failed"
 )
 
 // e2eFixture pairs a server-side Signer with a matching client-side
@@ -124,30 +133,43 @@ func (l *captureLogger) hasErrorContaining(s string) bool {
 	return false
 }
 
-// tamperingSigner wraps another Signer and corrupts the signature
-// bytes starting from the Nth call (1-indexed). Used to exercise the
-// "subsequent-message tampered signature" reject path while still
-// letting the first envelope's handshake succeed.
-type tamperingSigner struct {
+// controlledSigner wraps another Signer with optional failure-mode
+// injection: it can tamper signatures starting from the Nth call
+// (drives the "tampered subsequent signature" reject path) or return
+// failErr starting from the Nth call (drives the "mid-stream Sign
+// failure" reject path). Zero-valued tamperFromCall / failFromCall
+// disables the corresponding mode. Used only for tests.
+type controlledSigner struct {
 	inner          signing.Signer
 	callN          atomic.Int32
 	tamperFromCall int32
+	failFromCall   int32
+	failErr        error
 }
 
-func (t *tamperingSigner) Sign(ctx context.Context, payload []byte) ([]byte, error) {
-	n := t.callN.Add(1)
-	sig, err := t.inner.Sign(ctx, payload)
+func (s *controlledSigner) Sign(ctx context.Context, payload []byte) ([]byte, error) {
+	n := s.callN.Add(1)
+	if s.failFromCall > 0 && n >= s.failFromCall {
+		return nil, s.failErr
+	}
+	sig, err := s.inner.Sign(ctx, payload)
 	if err != nil {
 		return nil, err
 	}
-	if n >= t.tamperFromCall && len(sig) > 0 {
-		sig[0] ^= 0xff
+	if s.tamperFromCall > 0 && n >= s.tamperFromCall && len(sig) > 0 {
+		// Copy before mutating: the inner signer's contract doesn't
+		// promise the returned slice is exclusively ours, and a future
+		// pooled signer would break under in-place mutation.
+		out := make([]byte, len(sig))
+		copy(out, sig)
+		out[0] ^= 0xff
+		return out, nil
 	}
 	return sig, nil
 }
 
-func (t *tamperingSigner) ChainDER(ctx context.Context) ([][]byte, error) {
-	return t.inner.ChainDER(ctx)
+func (s *controlledSigner) ChainDER(ctx context.Context) ([][]byte, error) {
+	return s.inner.ChainDER(ctx)
 }
 
 // runServer spins up an in-process OpAMP server. signer may be nil
@@ -266,6 +288,20 @@ func startClient(
 	return c
 }
 
+// assertRejected is the common reject-scenario tail: wait until the
+// client logs the canonical attestation-failure substring (fail-fast
+// via require.Eventually), then confirm no message was ever delivered
+// to OnMessage during e2eNonOccurrenceDeadline.
+func assertRejected(t *testing.T, logger *captureLogger, msgN *atomic.Int32) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		return logger.hasErrorContaining(attestationFailureLogSubstring)
+	}, e2eDeadline, 10*time.Millisecond,
+		"client never logged %q within e2eDeadline", attestationFailureLogSubstring)
+	time.Sleep(e2eNonOccurrenceDeadline)
+	assert.Equal(t, int32(0), msgN.Load(), "OnMessage should not fire when attestation fails")
+}
+
 // TestE2E_HappyPath_AllAlgorithms_WS exercises the full WS round trip
 // for each supported signature algorithm. The client requires
 // attestation; the server signs every outbound. We assert OnMessage
@@ -293,7 +329,7 @@ func TestE2E_HappyPath_AllAlgorithms_WS(t *testing.T) {
 			}, nil)
 			defer c.Stop(context.Background())
 
-			assert.Eventually(t, func() bool { return msgN.Load() >= 1 }, e2eDeadline, 10*time.Millisecond,
+			require.Eventually(t, func() bool { return msgN.Load() >= 1 }, e2eDeadline, 10*time.Millisecond,
 				"client never received a ServerToAgent")
 
 			// Chain validated once on the first envelope; signature
@@ -328,18 +364,22 @@ func TestE2E_FirstAndSubsequent_WS(t *testing.T) {
 	}, nil)
 	defer c.Stop(context.Background())
 
-	// First message — server's OnMessage response.
-	assert.Eventually(t, func() bool { return msgN.Load() >= 1 }, e2eDeadline, 10*time.Millisecond,
+	// First message — server's OnMessage response. Use require so
+	// we fail fast (and don't deref a nil savedConn below).
+	require.Eventually(t, func() bool { return msgN.Load() >= 1 }, e2eDeadline, 10*time.Millisecond,
 		"client never received the first ServerToAgent")
 	require.NotNil(t, savedConn.Load(), "server never observed OnConnected")
 
-	// Second message — server-pushed via Connection.Send.
+	// Second message — server-pushed via Connection.Send. The
+	// connection's signing-negotiation is complete by now because
+	// OnMessage on the server has fired (signing is decided BEFORE
+	// OnMessage; see handleWSConnection).
 	conn := *savedConn.Load()
 	require.NoError(t, conn.Send(context.Background(), &protobufs.ServerToAgent{
 		InstanceUid: []byte("subsequent-uid00"),
 	}))
 
-	assert.Eventually(t, func() bool { return msgN.Load() >= 2 }, e2eDeadline, 10*time.Millisecond,
+	require.Eventually(t, func() bool { return msgN.Load() >= 2 }, e2eDeadline, 10*time.Millisecond,
 		"client never received the second ServerToAgent")
 
 	assert.Equal(t, int32(1), f.verifier.validateChainN.Load(), "chain validated only on first envelope")
@@ -361,7 +401,7 @@ func TestE2E_NoAttestation_WS(t *testing.T) {
 	}, nil)
 	defer c.Stop(context.Background())
 
-	assert.Eventually(t, func() bool { return msgN.Load() >= 1 }, e2eDeadline, 10*time.Millisecond,
+	require.Eventually(t, func() bool { return msgN.Load() >= 1 }, e2eDeadline, 10*time.Millisecond,
 		"plain OpAMP path should still deliver a ServerToAgent")
 }
 
@@ -386,15 +426,7 @@ func TestE2E_Reject_ServerHasNoSigner_WS(t *testing.T) {
 	}, logger)
 	defer c.Stop(context.Background())
 
-	// Wait long enough for the Agent to receive at least one bad
-	// envelope and tear the connection down.
-	assert.Eventually(t, func() bool {
-		return logger.hasErrorContaining("Payload trust verification failed")
-	}, e2eDeadline, 10*time.Millisecond, "client never logged an attestation failure")
-
-	// The Agent must NOT deliver any message that failed verification.
-	time.Sleep(e2eNonOccurrenceDeadline)
-	assert.Equal(t, int32(0), msgN.Load(), "OnMessage should not fire when attestation fails")
+	assertRejected(t, logger, &msgN)
 }
 
 // TestE2E_Reject_ExpiredLeaf_WS — Server's leaf is expired. The
@@ -419,11 +451,7 @@ func TestE2E_Reject_ExpiredLeaf_WS(t *testing.T) {
 	}, logger)
 	defer c.Stop(context.Background())
 
-	assert.Eventually(t, func() bool {
-		return logger.hasErrorContaining("Payload trust verification failed")
-	}, e2eDeadline, 10*time.Millisecond, "client should reject expired leaf")
-	time.Sleep(e2eNonOccurrenceDeadline)
-	assert.Equal(t, int32(0), msgN.Load(), "OnMessage should not fire for expired leaf")
+	assertRejected(t, logger, &msgN)
 	assert.GreaterOrEqual(t, f.verifier.validateChainN.Load(), int32(1), "ValidateChain should have been called")
 }
 
@@ -445,11 +473,7 @@ func TestE2E_Reject_WrongCA_WS(t *testing.T) {
 	}, logger)
 	defer c.Stop(context.Background())
 
-	assert.Eventually(t, func() bool {
-		return logger.hasErrorContaining("Payload trust verification failed")
-	}, e2eDeadline, 10*time.Millisecond, "client should reject chain from an unknown CA")
-	time.Sleep(e2eNonOccurrenceDeadline)
-	assert.Equal(t, int32(0), msgN.Load(), "OnMessage should not fire for unknown CA")
+	assertRejected(t, logger, &msgN)
 	assert.GreaterOrEqual(t, client2.verifier.validateChainN.Load(), int32(1), "ValidateChain should have been called")
 }
 
@@ -460,7 +484,7 @@ func TestE2E_Reject_WrongCA_WS(t *testing.T) {
 func TestE2E_Reject_TamperedSubsequentSignature_WS(t *testing.T) {
 	f := newFixture(t, signing.AlgorithmECDSAP256SHA256)
 	// Wrap the signer so the SECOND signature it produces is corrupted.
-	bad := &tamperingSigner{inner: f.signer, tamperFromCall: 2}
+	bad := &controlledSigner{inner: f.signer, tamperFromCall: 2}
 
 	var savedConn atomic.Pointer[servertypes.Connection]
 	onConnected := func(_ context.Context, conn servertypes.Connection) {
@@ -479,23 +503,25 @@ func TestE2E_Reject_TamperedSubsequentSignature_WS(t *testing.T) {
 	}, logger)
 	defer c.Stop(context.Background())
 
-	// First message must succeed.
-	assert.Eventually(t, func() bool { return msgN.Load() >= 1 }, e2eDeadline, 10*time.Millisecond,
+	// First message must succeed. Use require so we fail fast and
+	// don't deref a nil savedConn below.
+	require.Eventually(t, func() bool { return msgN.Load() >= 1 }, e2eDeadline, 10*time.Millisecond,
 		"first envelope should pass since its signature is well-formed")
+	require.NotNil(t, savedConn.Load(), "server never observed OnConnected")
 
 	// Push the second — its signature will be corrupted by the
-	// tamperingSigner wrapper.
+	// controlledSigner wrapper.
 	conn := *savedConn.Load()
 	require.NoError(t, conn.Send(context.Background(), &protobufs.ServerToAgent{
 		InstanceUid: []byte("tampered-uid0000"),
 	}))
 
-	assert.Eventually(t, func() bool {
-		return logger.hasErrorContaining("Payload trust verification failed")
+	got := msgN.Load()
+	require.Eventually(t, func() bool {
+		return logger.hasErrorContaining(attestationFailureLogSubstring)
 	}, e2eDeadline, 10*time.Millisecond, "client should reject the tampered subsequent envelope")
 
 	// The second message must NOT have been delivered.
-	got := msgN.Load()
 	time.Sleep(e2eNonOccurrenceDeadline)
 	assert.Equal(t, got, msgN.Load(), "OnMessage should not fire after the tampered envelope")
 }
@@ -518,14 +544,16 @@ func TestE2E_HappyPath_HTTP(t *testing.T) {
 	}, nil)
 	defer c.Stop(context.Background())
 
-	assert.Eventually(t, func() bool { return msgN.Load() >= 1 }, e2eDeadline, 10*time.Millisecond,
+	require.Eventually(t, func() bool { return msgN.Load() >= 1 }, e2eDeadline, 10*time.Millisecond,
 		"HTTP client never received a ServerToAgent")
 	assert.GreaterOrEqual(t, f.verifier.validateChainN.Load(), int32(1), "ValidateChain should run on first envelope")
 }
 
 // TestE2E_HTTP_Reject_WrongCA — same as the WS variant but on the
 // HTTP polling transport. The Agent keeps polling but never delivers
-// a verified message.
+// a verified message. The HTTP receive path now emits the same
+// canonical "Payload trust verification failed" sentinel as WS, so
+// assertRejected works uniformly.
 func TestE2E_HTTP_Reject_WrongCA(t *testing.T) {
 	server1 := newFixture(t, signing.AlgorithmECDSAP256SHA256)
 	client2 := newFixture(t, signing.AlgorithmECDSAP256SHA256) // independent CA
@@ -542,10 +570,181 @@ func TestE2E_HTTP_Reject_WrongCA(t *testing.T) {
 	}, logger)
 	defer c.Stop(context.Background())
 
-	assert.Eventually(t, func() bool {
-		return logger.hasErrorContaining("cannot unmarshal response")
-	}, e2eDeadline, 10*time.Millisecond, "HTTP client should reject chain from an unknown CA")
+	assertRejected(t, logger, &msgN)
+	assert.GreaterOrEqual(t, client2.verifier.validateChainN.Load(), int32(1),
+		"ValidateChain on HTTP should have been called at least once")
+}
+
+// TestE2E_ConcurrentConnections_MixedSigningState — two agents share
+// the same server: one requires attestation (and gets wrapped
+// responses), the other doesn't (and gets plain wire). Confirms the
+// server's per-connection signing state is isolated, and that one
+// agent's handshake doesn't leak into the other's wire format.
+func TestE2E_ConcurrentConnections_MixedSigningState(t *testing.T) {
+	f := newFixture(t, signing.AlgorithmECDSAP256SHA256)
+
+	srv, endpoint := runServer(t, f.signer, nil, nil)
+	defer srv.Stop(context.Background())
+
+	// Agent A — requires attestation. Its verifier should fire.
+	var aMsgN atomic.Int32
+	cA := startClient(t, "ws", endpoint, f.verifier, clienttypes.Callbacks{
+		OnMessage: func(_ context.Context, _ *clienttypes.MessageData) {
+			aMsgN.Add(1)
+		},
+	}, nil)
+	defer cA.Stop(context.Background())
+
+	// Agent B — same server, no verifier (does NOT require attestation).
+	// Server's PayloadSigner is configured, but B didn't opt in, so B
+	// must see plain ServerToAgent wire bytes.
+	var bMsgN atomic.Int32
+	cB := startClient(t, "ws", endpoint, nil /* no verifier */, clienttypes.Callbacks{
+		OnMessage: func(_ context.Context, _ *clienttypes.MessageData) {
+			bMsgN.Add(1)
+		},
+	}, nil)
+	defer cB.Stop(context.Background())
+
+	require.Eventually(t, func() bool { return aMsgN.Load() >= 1 }, e2eDeadline, 10*time.Millisecond,
+		"agent A (requires) never received a message")
+	require.Eventually(t, func() bool { return bMsgN.Load() >= 1 }, e2eDeadline, 10*time.Millisecond,
+		"agent B (no verifier) never received a message")
+
+	// A's verifier ran; B's wire format never went through any verifier
+	// (B doesn't have one). The fact that B got a message at all is
+	// proof the server didn't accidentally wrap B's responses.
+	assert.GreaterOrEqual(t, f.verifier.validateChainN.Load(), int32(1),
+		"A's verifier should have validated the chain")
+}
+
+// errSignFailure is the sentinel returned by the failing controlledSigner
+// in TestE2E_Reject_MidStreamSignFailure_WS.
+var errSignFailure = fmt.Errorf("e2e test: synthetic signer failure")
+
+// TestE2E_Reject_MidStreamSignFailure_WS — handshake succeeds; the
+// server's signer fails on the second outbound Sign call. The
+// server-side OnMessageResponseError callback fires; the agent never
+// delivers a corrupt message; Send returns the signer's error.
+func TestE2E_Reject_MidStreamSignFailure_WS(t *testing.T) {
+	f := newFixture(t, signing.AlgorithmECDSAP256SHA256)
+	bad := &controlledSigner{
+		inner:        f.signer,
+		failFromCall: 2,
+		failErr:      errSignFailure,
+	}
+
+	var savedConn atomic.Pointer[servertypes.Connection]
+	onConnected := func(_ context.Context, conn servertypes.Connection) {
+		savedConn.Store(&conn)
+	}
+
+	srv, endpoint := runServer(t, bad, onConnected, nil)
+	defer srv.Stop(context.Background())
+
+	var msgN atomic.Int32
+	c := startClient(t, "ws", endpoint, f.verifier, clienttypes.Callbacks{
+		OnMessage: func(_ context.Context, _ *clienttypes.MessageData) {
+			msgN.Add(1)
+		},
+	}, nil)
+	defer c.Stop(context.Background())
+
+	// First message succeeds (callN starts at 0; failFromCall is 2).
+	require.Eventually(t, func() bool { return msgN.Load() >= 1 }, e2eDeadline, 10*time.Millisecond,
+		"first envelope should pass since its signature is well-formed")
+	require.NotNil(t, savedConn.Load(), "server never observed OnConnected")
+
+	// Push the second outbound — signer will fail this time. The
+	// signer's error propagates back through wsConnection.Send.
+	conn := *savedConn.Load()
+	err := conn.Send(context.Background(), &protobufs.ServerToAgent{
+		InstanceUid: []byte("mid-stream-uid00"),
+	})
+	require.ErrorIs(t, err, errSignFailure, "Send should propagate the signer's error")
+
+	// Confirm the agent never sees the corrupt message — neither
+	// payload (since signing failed before wire write) nor a tampered
+	// envelope (since we error out before WriteWSMessage runs).
 	time.Sleep(e2eNonOccurrenceDeadline)
-	assert.Equal(t, int32(0), msgN.Load(), "OnMessage should not fire when HTTP attestation fails")
-	assert.GreaterOrEqual(t, client2.verifier.validateChainN.Load(), int32(1), "ValidateChain should have been called")
+	assert.Equal(t, int32(1), msgN.Load(), "agent should still have only the first message")
+}
+
+// TestE2E_SendBeforeNegotiation_Errors_WS — when the server has a
+// PayloadSigner configured and the user's OnConnected callback calls
+// Connection.Send BEFORE the first AgentToServer has been processed,
+// Send must return ErrSendBeforeNegotiated rather than emitting
+// unsigned wire bytes. Closes the silent-bypass gap the code review
+// flagged.
+func TestE2E_SendBeforeNegotiation_Errors_WS(t *testing.T) {
+	f := newFixture(t, signing.AlgorithmECDSAP256SHA256)
+
+	var sendErr atomic.Value // error
+	onConnected := func(_ context.Context, conn servertypes.Connection) {
+		err := conn.Send(context.Background(), &protobufs.ServerToAgent{
+			InstanceUid: []byte("premature-uid000"),
+		})
+		sendErr.Store(err)
+	}
+
+	srv, endpoint := runServer(t, f.signer, onConnected, nil)
+	defer srv.Stop(context.Background())
+
+	var msgN atomic.Int32
+	c := startClient(t, "ws", endpoint, f.verifier, clienttypes.Callbacks{
+		OnMessage: func(_ context.Context, _ *clienttypes.MessageData) {
+			msgN.Add(1)
+		},
+	}, nil)
+	defer c.Stop(context.Background())
+
+	require.Eventually(t, func() bool { return sendErr.Load() != nil }, e2eDeadline, 10*time.Millisecond,
+		"server's OnConnected never fired")
+	got, ok := sendErr.Load().(error)
+	require.True(t, ok, "sendErr should hold an error")
+	require.ErrorIs(t, got, server.ErrSendBeforeNegotiated,
+		"Send before the first AgentToServer should error when PayloadSigner is configured")
+
+	// After the pre-handshake Send error, the agent should still
+	// negotiate normally on its next AgentToServer and receive a
+	// valid signed response.
+	require.Eventually(t, func() bool { return msgN.Load() >= 1 }, e2eDeadline, 10*time.Millisecond,
+		"negotiation should still succeed despite the pre-handshake Send error")
+}
+
+// TestE2E_SendBeforeNegotiation_NoSigner_AllowsSend_WS — control case
+// for the test above: when PayloadSigner is NOT configured, Send from
+// OnConnected works as before (no negotiation gate). Confirms the
+// gate is strictly scoped to attestation-enabled servers.
+func TestE2E_SendBeforeNegotiation_NoSigner_AllowsSend_WS(t *testing.T) {
+	var sendCalled atomic.Bool
+	var sendOK atomic.Bool
+	onConnected := func(_ context.Context, conn servertypes.Connection) {
+		err := conn.Send(context.Background(), &protobufs.ServerToAgent{
+			InstanceUid: []byte("preflight-uid000"),
+		})
+		sendCalled.Store(true)
+		if err == nil {
+			sendOK.Store(true)
+		}
+	}
+
+	srv, endpoint := runServer(t, nil /* no signer */, onConnected, nil)
+	defer srv.Stop(context.Background())
+
+	var msgN atomic.Int32
+	c := startClient(t, "ws", endpoint, nil /* no verifier */, clienttypes.Callbacks{
+		OnMessage: func(_ context.Context, _ *clienttypes.MessageData) {
+			msgN.Add(1)
+		},
+	}, nil)
+	defer c.Stop(context.Background())
+
+	require.Eventually(t, sendCalled.Load, e2eDeadline, 10*time.Millisecond,
+		"server's OnConnected never fired")
+	assert.True(t, sendOK.Load(),
+		"Send before negotiation should succeed when PayloadSigner is nil")
+
+	require.Eventually(t, func() bool { return msgN.Load() >= 1 }, e2eDeadline, 10*time.Millisecond,
+		"client should still receive messages")
 }

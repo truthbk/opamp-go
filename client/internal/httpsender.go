@@ -396,9 +396,15 @@ func (h *HTTPSender) receiveResponse(ctx context.Context, resp *http.Response) {
 		// the cached firstSeen flag would keep us in the "verify
 		// signature" branch and the Agent could be stuck rejecting
 		// every subsequent response.
-		h.logger.Errorf(ctx, "cannot unmarshal response: %v", err)
-		if h.attestation != nil {
+		//
+		// Use the same sentinel string the WebSocket receive path
+		// emits ("Payload trust verification failed") so operators
+		// can grep for one canonical phrase across both transports.
+		if h.attestation != nil && isAttestationFailure(err) {
+			h.logger.Errorf(ctx, "Payload trust verification failed; resetting attestation state: %v", err)
 			h.attestation.Reset()
+		} else {
+			h.logger.Errorf(ctx, "cannot unmarshal response: %v", err)
 		}
 		return
 	}

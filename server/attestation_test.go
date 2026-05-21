@@ -267,8 +267,12 @@ func TestServerWraps_WhenAgentRequires_WS(t *testing.T) {
 
 // TestServerDoesNotWrap_WhenAgentDoesNotRequire_WS confirms that when
 // the Agent doesn't set the Requires bit, the Server's outbound
-// messages are plain ServerToAgent (wire-identical to upstream),
-// even with PayloadSigner configured.
+// messages are plain ServerToAgent — NOT wrapped in an envelope —
+// even with PayloadSigner configured. The server still advertises
+// OffersPayloadTrustVerification in response.Capabilities so the
+// Agent learns it could opt in on a future reconnect (per the spec's
+// negotiation matrix: No/Yes quadrant — server capable, agent
+// declined).
 func TestServerDoesNotWrap_WhenAgentDoesNotRequire_WS(t *testing.T) {
 	f := newServerSigningFixture(t)
 
@@ -309,17 +313,38 @@ func TestServerDoesNotWrap_WhenAgentDoesNotRequire_WS(t *testing.T) {
 	// and SignedServerToAgent partially decodable from the same wire
 	// bytes (InstanceUid vs Payload), so we can't disprove the
 	// envelope shape by attempting to decode as one. Instead, decode
-	// as the expected ServerToAgent and confirm the InstanceUid
-	// round-trips and the Signature/TrustChainResponse fields are
-	// absent from the wire by checking the envelope decode produces
-	// an empty Signature (which is field 2 — distinct from anything
-	// ServerToAgent carries).
+	// the wire as ServerToAgent and assert InstanceUid round-trips;
+	// then decode as SignedServerToAgent and check the envelope-only
+	// fields (Signature field 2, TrustChainResponse field 3) are
+	// absent — neither of which exists on ServerToAgent.
 	var response protobufs.ServerToAgent
 	require.NoError(t, sharedinternal.DecodeWSMessage(frame, &response))
 	assert.Equal(t, sendMsg.InstanceUid, response.InstanceUid)
+	// Offers bit MUST be advertised because PayloadSigner is
+	// configured — spec No/Yes quadrant.
+	offersBit := uint64(protobufs.ServerCapabilities_ServerCapabilities_OffersPayloadTrustVerification)
+	assert.NotZero(t, response.Capabilities&offersBit,
+		"OffersPayloadTrustVerification should be advertised whenever PayloadSigner is configured")
 
 	var envelope protobufs.SignedServerToAgent
 	require.NoError(t, sharedinternal.DecodeWSMessage(frame, &envelope))
 	require.Empty(t, envelope.Signature, "no signature emitted when Agent didn't opt in")
 	require.Nil(t, envelope.TrustChainResponse, "no chain emitted when Agent didn't opt in")
+}
+
+// TestSignOutgoing_MidStreamSignFailure_PropagatesError exercises the
+// failingSigner.signErr path: a signer that produces a valid chain
+// but fails when asked to Sign. signOutgoing must propagate the
+// signer's error wrapped with context.
+func TestSignOutgoing_MidStreamSignFailure_PropagatesError(t *testing.T) {
+	ctx := context.Background()
+	signErr := errors.New("e2e test: synthetic signer failure")
+	bad := &failingSigner{signErr: signErr}
+
+	state, err := newConnectionSigningState(ctx, bad)
+	require.NoError(t, err, "ChainDER should succeed; the failure is on Sign")
+
+	_, err = state.signOutgoing(ctx, &protobufs.ServerToAgent{InstanceUid: testInstanceUid})
+	require.Error(t, err)
+	require.ErrorIs(t, err, signErr, "signOutgoing should propagate the signer's error")
 }
