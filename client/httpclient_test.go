@@ -249,17 +249,23 @@ func TestRedirectHTTP(t *testing.T) {
 		MockRedirect *checkRedirectMock
 	}{
 		{
+			// 307 Temporary Redirect preserves both method and body, so
+			// the redirected POST still reaches redirectee as a POST with
+			// the OpAMP protobuf payload — the mock server's plain-HTTP
+			// dispatch path handles it. (302/303 would convert POST→GET
+			// in net/http, stripping Content-Type, so the mock server
+			// would fall through to a WS upgrade and fail with 400.)
 			Name:       "simple redirect",
-			Redirector: redirectServer("http://"+redirectee.Endpoint, 302),
+			Redirector: redirectServer("http://"+redirectee.Endpoint, http.StatusTemporaryRedirect),
 		},
 		{
 			Name:         "check redirect",
-			Redirector:   redirectServer("http://"+redirectee.Endpoint, 302),
+			Redirector:   redirectServer("http://"+redirectee.Endpoint, http.StatusTemporaryRedirect),
 			MockRedirect: mockRedirectHTTP(t, 1, nil),
 		},
 		{
 			Name:         "check redirect returns error",
-			Redirector:   redirectServer("http://"+redirectee.Endpoint, 302),
+			Redirector:   redirectServer("http://"+redirectee.Endpoint, http.StatusTemporaryRedirect),
 			MockRedirect: mockRedirectHTTP(t, 1, errors.New("hello")),
 			ExpError:     true,
 		},

@@ -361,6 +361,15 @@ func (h *HTTPSender) prepareRequest(ctx context.Context) (*requestWrapper, error
 		req.bodyReader = bodyReader(data)
 	}
 
+	// Provide GetBody so net/http can replay the request body when
+	// following a method-preserving redirect (307/308). Without this,
+	// the http.Client returns "http: can't replay request body" before
+	// re-issuing the redirected POST.
+	br := req.bodyReader
+	r.GetBody = func() (io.ReadCloser, error) {
+		return br(), nil
+	}
+
 	req.Header = h.getHeader()
 
 	if msgToSend.InstanceUid != nil {
