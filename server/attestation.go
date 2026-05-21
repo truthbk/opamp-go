@@ -3,7 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
-	"sync"
+	"sync/atomic"
 
 	"google.golang.org/protobuf/proto"
 
@@ -17,15 +17,14 @@ import (
 //
 // The signer is held by reference; the certificate chain is
 // snapshotted at construction time so that operator-side cert
-// rotation does not affect a live connection (the agent only revalidates
-// the chain on reconnect). The mutex is held briefly per outbound
-// message to flip firstSent.
+// rotation does not affect a live connection (the agent only
+// revalidates the chain on reconnect). firstSent atomically tracks
+// whether the chain has already been delivered on this connection so
+// that exactly one outbound envelope carries it.
 type connectionSigningState struct {
-	signer   signing.Signer
-	chainDER [][]byte // snapshot
-
-	mu        sync.Mutex
-	firstSent bool
+	signer    signing.Signer
+	chainDER  [][]byte // snapshot
+	firstSent atomic.Bool
 }
 
 // newConnectionSigningState constructs the per-connection state by
@@ -64,14 +63,10 @@ func (s *connectionSigningState) signOutgoing(ctx context.Context, msg *protobuf
 		Signature: sig,
 	}
 
-	s.mu.Lock()
-	includeChain := !s.firstSent
-	if includeChain {
-		s.firstSent = true
-	}
-	s.mu.Unlock()
-
-	if includeChain {
+	// CompareAndSwap returns true iff we were the goroutine that
+	// transitioned firstSent from false to true — guaranteeing exactly
+	// one envelope carries the trust chain across concurrent callers.
+	if s.firstSent.CompareAndSwap(false, true) {
 		chain := make([]*protobufs.TrustChainResponse_Certificate, len(s.chainDER))
 		for i, der := range s.chainDER {
 			chain[i] = &protobufs.TrustChainResponse_Certificate{DerData: der}

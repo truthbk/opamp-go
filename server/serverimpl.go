@@ -238,7 +238,7 @@ func (s *server) httpHandler(w http.ResponseWriter, req *http.Request) {
 }
 
 func (s *server) handleWSConnection(reqCtx context.Context, wsConn *websocket.Conn, connectionCallbacks *serverTypes.ConnectionCallbacks) {
-	agentConn := newWSConnection(wsConn)
+	agentConn := newWSConnection(wsConn, s.settings.PayloadSigner != nil)
 
 	defer func() {
 		// Close the connection when all is done.
@@ -259,11 +259,6 @@ func (s *server) handleWSConnection(reqCtx context.Context, wsConn *websocket.Co
 	connectionCallbacks.OnConnected(reqCtx, agentConn)
 
 	sentCustomCapabilities := false
-	// signingNegotiated tracks whether we've already inspected the
-	// Agent's capabilities for this connection. The handshake is
-	// driven by the first AgentToServer's capabilities; subsequent
-	// messages don't re-negotiate.
-	signingNegotiated := false
 
 	// Loop until fail to read from the WebSocket connection.
 	for {
@@ -312,9 +307,9 @@ func (s *server) handleWSConnection(reqCtx context.Context, wsConn *websocket.Co
 		// to have a configured PayloadSigner. If both line up, snapshot
 		// the chain and attach a signing state to the connection so
 		// subsequent Sends wrap their messages in a SignedServerToAgent
-		// envelope.
-		if !signingNegotiated {
-			signingNegotiated = true
+		// envelope. markNegotiated also unblocks Send for callers that
+		// were rejected pre-negotiation (see ErrSendBeforeNegotiated).
+		if !agentConn.isNegotiated() {
 			if s.settings.PayloadSigner != nil && agentRequiresAttestation(request.Capabilities) {
 				state, err := newConnectionSigningState(msgContext, s.settings.PayloadSigner)
 				if err != nil {
@@ -323,6 +318,7 @@ func (s *server) handleWSConnection(reqCtx context.Context, wsConn *websocket.Co
 				}
 				agentConn.enableSigning(state)
 			}
+			agentConn.markNegotiated()
 		}
 
 		response := connectionCallbacks.OnMessage(msgContext, agentConn, &request)
@@ -339,10 +335,13 @@ func (s *server) handleWSConnection(reqCtx context.Context, wsConn *websocket.Co
 			}
 			sentCustomCapabilities = true
 		}
-		// Auto-advertise OffersPayloadTrustVerification when this
-		// connection has signing enabled. The Agent inspects this bit
-		// on the first ServerToAgent.
-		if agentConn.signing != nil {
+		// Auto-advertise OffersPayloadTrustVerification whenever the
+		// server has a PayloadSigner configured — independent of
+		// whether THIS agent declared the Requires bit. Per the spec's
+		// negotiation matrix, the bit signals server capability.
+		// Agents that don't require attestation still see the bit and
+		// can choose to opt in on reconnect.
+		if s.settings.PayloadSigner != nil {
 			response.Capabilities = addOffersAttestationBit(response.Capabilities)
 		}
 
@@ -451,22 +450,34 @@ func (s *server) handlePlainHTTPRequest(req *http.Request, w http.ResponseWriter
 	// the signature. The Agent's HTTP receive path is stateful across
 	// polls (see client/internal/attestation.go) but tolerates the
 	// chain being re-sent — it just ignores it after the first.
+	//
+	// TODO(perf): for RPC-backed signers, newConnectionSigningState
+	// re-fetches the chain on every request — at 10⁶ agents polling
+	// every 30s that's ~33k RPS just for ChainDER. A server-level
+	// cache (or a TTL-aware Signer wrapper) would amortise the cost.
+	// Defer until LocalSigner is no longer the only impl in use.
 	var responseMessage proto.Message = response
-	if s.settings.PayloadSigner != nil && agentRequiresAttestation(request.Capabilities) {
+	if s.settings.PayloadSigner != nil {
+		// Always advertise Offers when the server is capable, even
+		// if THIS agent didn't declare Requires (per spec's
+		// negotiation matrix).
 		response.Capabilities = addOffersAttestationBit(response.Capabilities)
-		state, sigErr := newConnectionSigningState(req.Context(), s.settings.PayloadSigner)
-		if sigErr != nil {
-			s.logger.Errorf(req.Context(), "Cannot fetch signing certificate chain: %v", sigErr)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
+
+		if agentRequiresAttestation(request.Capabilities) {
+			state, sigErr := newConnectionSigningState(req.Context(), s.settings.PayloadSigner)
+			if sigErr != nil {
+				s.logger.Errorf(req.Context(), "Cannot fetch signing certificate chain: %v", sigErr)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			envelope, sigErr := state.signOutgoing(req.Context(), response)
+			if sigErr != nil {
+				s.logger.Errorf(req.Context(), "Cannot sign HTTP response: %v", sigErr)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			responseMessage = envelope
 		}
-		envelope, sigErr := state.signOutgoing(req.Context(), response)
-		if sigErr != nil {
-			s.logger.Errorf(req.Context(), "Cannot sign HTTP response: %v", sigErr)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		responseMessage = envelope
 	}
 
 	// Marshal the response (or its envelope).
