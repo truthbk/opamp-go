@@ -39,6 +39,18 @@ var (
 	// payload would unmarshal into an empty ServerToAgent and is
 	// rejected eagerly.
 	ErrMissingPayload = errors.New("client: SignedServerToAgent missing payload")
+
+	// ErrEmptyInnerServerToAgent is returned when the inner payload
+	// decodes to a ServerToAgent with all default values. Defends
+	// against the proto3 field-1 wire-type collision: a malicious
+	// server that downgrades by responding with a plain ServerToAgent
+	// has its InstanceUid bytes misinterpreted as
+	// SignedServerToAgent.payload; the inner decode of those random
+	// UUID bytes either errors or produces a default-valued message.
+	// Legitimate server responses always carry at least InstanceUid
+	// because handleWSConnection auto-fills it (see
+	// server/serverimpl.go).
+	ErrEmptyInnerServerToAgent = errors.New("client: inner ServerToAgent decoded to all default values; likely downgrade attempt")
 )
 
 // attestationState holds per-connection state for payload trust
@@ -95,6 +107,7 @@ func isAttestationFailure(err error) bool {
 		errors.Is(err, ErrTrustChainErrorReported) ||
 		errors.Is(err, ErrMissingSignature) ||
 		errors.Is(err, ErrMissingPayload) ||
+		errors.Is(err, ErrEmptyInnerServerToAgent) ||
 		errors.Is(err, signing.ErrChainValidation) ||
 		errors.Is(err, signing.ErrSignatureMismatch) ||
 		errors.Is(err, signing.ErrEmptyChain) ||
@@ -190,6 +203,15 @@ func unwrapServerToAgent(ctx context.Context, state *attestationState, rawProto 
 	}
 	if err := proto.Unmarshal(payload, msg); err != nil {
 		return fmt.Errorf("client: decode inner ServerToAgent: %w", err)
+	}
+	// Defense in depth against proto3 field-1 wire-type collision.
+	// ProcessEnvelope's chain/signature checks already terminate the
+	// connection on the downgrade path that produces this state, but
+	// this check pins the contract: every legitimate ServerToAgent
+	// the agent processes has at least one non-default field
+	// (typically InstanceUid).
+	if proto.Equal(msg, &protobufs.ServerToAgent{}) {
+		return ErrEmptyInnerServerToAgent
 	}
 	return nil
 }
