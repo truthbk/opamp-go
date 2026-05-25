@@ -748,3 +748,102 @@ func TestE2E_SendBeforeNegotiation_NoSigner_AllowsSend_WS(t *testing.T) {
 	require.Eventually(t, func() bool { return msgN.Load() >= 1 }, e2eDeadline, 10*time.Millisecond,
 		"client should still receive messages")
 }
+
+// rotatableSigner wraps a signing.Signer indirectly: it holds an
+// atomic.Pointer that the test can swap to a different inner signer
+// at any moment. Used by the mid-stream key rotation test below.
+//
+// The contract being tested: opamp-go's server snapshots the chain
+// at connection accept time (newConnectionSigningState calls
+// ChainDER once). Subsequent Sign calls go to whatever the current
+// inner signer is — but the agent's verifier locked in the FIRST
+// chain's leaf via firstSeen, so signatures from a rotated inner
+// signer (different key) MUST fail verification on the live
+// connection. Rotation only takes effect on RECONNECT.
+type rotatableSigner struct {
+	inner atomic.Pointer[signing.LocalSigner]
+}
+
+func (r *rotatableSigner) Sign(ctx context.Context, payload []byte) ([]byte, error) {
+	return r.inner.Load().Sign(ctx, payload)
+}
+
+func (r *rotatableSigner) ChainDER(ctx context.Context) ([][]byte, error) {
+	return r.inner.Load().ChainDER(ctx)
+}
+
+// TestE2E_MidStreamKeyRotation_DoesNotAffectLiveConnection pins the
+// per-connection chain snapshot semantic: rotating the server's
+// underlying signing key mid-stream MUST NOT compromise the agent's
+// current connection — signatures from the rotated key fail
+// verification against the snapshotted leaf, the agent terminates
+// the connection, and on reconnect it picks up the new chain.
+//
+// This is documented in two code comments today
+// (server/attestation.go's connectionSigningState — "the chain is
+// snapshotted at construction time so that operator-side cert
+// rotation does not affect a live connection" — and
+// client/internal/httpsender.go's Reset() — "recover from mid-stream
+// faults such as server-side key rotation") but had no test until
+// now.
+func TestE2E_MidStreamKeyRotation_DoesNotAffectLiveConnection(t *testing.T) {
+	// First key pair: server signs the handshake with this, agent's
+	// verifier locks in the leaf via firstSeen.
+	first := newFixture(t, signing.AlgorithmECDSAP256SHA256)
+	rot := &rotatableSigner{}
+	rot.inner.Store(first.signer.(*signing.LocalSigner))
+
+	var savedConn atomic.Pointer[servertypes.Connection]
+	srv, endpoint := runServer(t, rot, func(_ context.Context, conn servertypes.Connection) {
+		savedConn.Store(&conn)
+	}, nil)
+	defer srv.Stop(context.Background())
+
+	var msgN atomic.Int32
+	logger := &captureLogger{}
+	c := startClient(t, "ws", endpoint, first.verifier, clienttypes.Callbacks{
+		OnMessage: func(_ context.Context, _ *clienttypes.MessageData) {
+			msgN.Add(1)
+		},
+	}, logger)
+	defer c.Stop(context.Background())
+
+	// Handshake: first envelope arrives signed by the FIRST key,
+	// carrying the FIRST chain. Agent validates chain, caches leaf.
+	require.Eventually(t, func() bool { return msgN.Load() >= 1 }, e2eDeadline, 10*time.Millisecond,
+		"client never received the first signed envelope")
+	require.NotNil(t, savedConn.Load(), "server never observed OnConnected")
+
+	// Rotate: swap the underlying signer to a fresh key pair. The
+	// server's per-connection state still holds the FIRST chain
+	// snapshot — but Sign() will now produce signatures from the
+	// SECOND key.
+	second := newFixture(t, signing.AlgorithmECDSAP256SHA256)
+	rot.inner.Store(second.signer.(*signing.LocalSigner))
+
+	// Snapshot the message count so we can assert the rotated-key
+	// push doesn't slip through.
+	msgsBeforeRotation := msgN.Load()
+
+	// Push a second server-initiated message. The wrapper signs with
+	// the second key; the agent's cached leaf is the first key's
+	// public key; verification fails; the WS receive loop terminates
+	// the connection. The agent will reconnect and re-handshake against
+	// the new chain — but that's not exercised here.
+	conn := *savedConn.Load()
+	require.NoError(t, conn.Send(context.Background(), &protobufs.ServerToAgent{
+		InstanceUid: []byte("post-rotate-uid0"),
+	}))
+
+	// Agent must log the attestation failure within e2eDeadline.
+	require.Eventually(t, func() bool {
+		return logger.hasErrorContaining(attestationFailureLogSubstring)
+	}, e2eDeadline, 10*time.Millisecond,
+		"client did not log %q for the rotated-key envelope", attestationFailureLogSubstring)
+
+	// The rotated envelope must NOT have been delivered to OnMessage.
+	// msgN may still equal msgsBeforeRotation, but it must not grow.
+	time.Sleep(e2eNonOccurrenceDeadline)
+	assert.Equal(t, msgsBeforeRotation, msgN.Load(),
+		"rotated-key envelope must not be delivered to OnMessage")
+}
