@@ -29,6 +29,11 @@ type wsReceiver struct {
 
 	// Indicates that the receiver has fully stopped.
 	stopped chan struct{}
+
+	// Set to true (before stopped is closed) when the loop exits because
+	// of a payload trust verification failure. Safe to read only after
+	// <-IsStopped() returns.
+	attestationFailure bool
 }
 
 // NewWSReceiver creates a new Receiver that uses WebSocket to receive
@@ -73,6 +78,12 @@ func (r *wsReceiver) Start(ctx context.Context) {
 // IsStopped returns a channel that's closed when the receiver is stopped.
 func (r *wsReceiver) IsStopped() <-chan struct{} {
 	return r.stopped
+}
+
+// WasAttestationFailure reports whether the receiver stopped because of a
+// payload trust verification failure. Only valid after <-IsStopped() returns.
+func (r *wsReceiver) WasAttestationFailure() bool {
+	return r.attestationFailure
 }
 
 // ReceiverLoop runs the receiver loop.
@@ -120,6 +131,9 @@ func (r *wsReceiver) ReceiverLoop(ctx context.Context) {
 						if r.conn != nil {
 							_ = r.conn.Close()
 						}
+						// Mark before returning so the caller can read
+						// WasAttestationFailure() after <-IsStopped().
+						r.attestationFailure = true
 						return
 					}
 					if !websocket.IsCloseError(res.err, websocket.CloseNormalClosure) {
