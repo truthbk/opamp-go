@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/pem"
 	"fmt"
 	"sync/atomic"
 
@@ -67,11 +68,11 @@ func (s *connectionSigningState) signOutgoing(ctx context.Context, msg *protobuf
 	// transitioned firstSent from false to true — guaranteeing exactly
 	// one envelope carries the trust chain across concurrent callers.
 	if s.firstSent.CompareAndSwap(false, true) {
-		chain := make([]*protobufs.TrustChainResponse_Certificate, len(s.chainDER))
-		for i, der := range s.chainDER {
-			chain[i] = &protobufs.TrustChainResponse_Certificate{DerData: der}
+		var pemChain []byte
+		for _, der := range s.chainDER {
+			pemChain = append(pemChain, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...)
 		}
-		env.TrustChainResponse = &protobufs.TrustChainResponse{CertificateChain: chain}
+		env.TrustChainResponse = &protobufs.TrustChainResponse{CertificateChain: pemChain}
 	}
 	return env, nil
 }

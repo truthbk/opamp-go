@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"testing"
@@ -40,8 +41,10 @@ func newAttestationFixture(t *testing.T) attestationFixture {
 }
 
 // buildFirstEnvelope produces the on-the-wire bytes for the FIRST
-// SignedServerToAgent on a connection — carries trust_chain_response
-// and an optional signature.
+// SignedServerToAgent on a connection — carries trust_chain_response.
+// signFirst controls whether a signature is included; the spec requires
+// it on every message, so pass true for happy-path tests and false only
+// when testing the missing-signature-on-first-message failure path.
 func (f attestationFixture) buildFirstEnvelope(t *testing.T, inner *protobufs.ServerToAgent, signFirst bool) *protobufs.SignedServerToAgent {
 	t.Helper()
 	payload, err := proto.Marshal(inner)
@@ -49,15 +52,15 @@ func (f attestationFixture) buildFirstEnvelope(t *testing.T, inner *protobufs.Se
 
 	chainDER, err := f.signer.ChainDER(context.Background())
 	require.NoError(t, err)
-	chain := make([]*protobufs.TrustChainResponse_Certificate, len(chainDER))
-	for i, c := range chainDER {
-		chain[i] = &protobufs.TrustChainResponse_Certificate{DerData: c}
+	var pemChain []byte
+	for _, der := range chainDER {
+		pemChain = append(pemChain, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...)
 	}
 
 	env := &protobufs.SignedServerToAgent{
 		Payload: payload,
 		TrustChainResponse: &protobufs.TrustChainResponse{
-			CertificateChain: chain,
+			CertificateChain: pemChain,
 		},
 	}
 	if signFirst {
@@ -88,7 +91,7 @@ func TestAttestationState_FirstAndSubsequent(t *testing.T) {
 	ctx := context.Background()
 
 	first := &protobufs.ServerToAgent{InstanceUid: []byte("first-msg-uid000")}
-	firstEnv := f.buildFirstEnvelope(t, first, false /* signFirst */)
+	firstEnv := f.buildFirstEnvelope(t, first, true /* signFirst — mandatory per spec */)
 
 	payload, err := state.ProcessEnvelope(ctx, firstEnv)
 	require.NoError(t, err)
@@ -111,19 +114,32 @@ func TestAttestationState_FirstAndSubsequent(t *testing.T) {
 	require.Equal(t, second.InstanceUid, secondParsed.InstanceUid)
 }
 
-// TestAttestationState_FirstMessageMayBeSigned confirms that when a
-// server chooses to sign the first envelope (defence-in-depth), the
-// signature is verified.
-func TestAttestationState_FirstMessageMayBeSigned(t *testing.T) {
+// TestAttestationState_FirstMessageMustBeSigned confirms that the first
+// envelope's signature is verified against the freshly validated leaf.
+func TestAttestationState_FirstMessageMustBeSigned(t *testing.T) {
 	f := newAttestationFixture(t)
 	state := newAttestationState(f.verifier)
 	ctx := context.Background()
 
 	inner := &protobufs.ServerToAgent{InstanceUid: []byte("signed-first-uid")}
-	env := f.buildFirstEnvelope(t, inner, true /* signFirst */)
+	env := f.buildFirstEnvelope(t, inner, true)
 
 	_, err := state.ProcessEnvelope(ctx, env)
 	require.NoError(t, err)
+}
+
+// TestAttestationState_MissingSignatureOnFirst confirms that the first
+// message is rejected when its signature is absent.
+func TestAttestationState_MissingSignatureOnFirst(t *testing.T) {
+	f := newAttestationFixture(t)
+	state := newAttestationState(f.verifier)
+	ctx := context.Background()
+
+	inner := &protobufs.ServerToAgent{InstanceUid: []byte("no-sig-first-uid")}
+	env := f.buildFirstEnvelope(t, inner, false /* no signature */)
+
+	_, err := state.ProcessEnvelope(ctx, env)
+	require.ErrorIs(t, err, ErrMissingSignature)
 }
 
 // TestAttestationState_FirstMessageSignedButTampered confirms that
@@ -208,7 +224,7 @@ func TestAttestationState_MissingSignatureOnSubsequent(t *testing.T) {
 	ctx := context.Background()
 
 	first := &protobufs.ServerToAgent{InstanceUid: []byte("first00000000000")}
-	_, err := state.ProcessEnvelope(ctx, f.buildFirstEnvelope(t, first, false))
+	_, err := state.ProcessEnvelope(ctx, f.buildFirstEnvelope(t, first, true))
 	require.NoError(t, err)
 
 	second := &protobufs.ServerToAgent{InstanceUid: []byte("second0000000000")}
@@ -228,7 +244,7 @@ func TestAttestationState_TamperedSignatureOnSubsequent(t *testing.T) {
 	ctx := context.Background()
 
 	first := &protobufs.ServerToAgent{InstanceUid: []byte("first00000000000")}
-	_, err := state.ProcessEnvelope(ctx, f.buildFirstEnvelope(t, first, false))
+	_, err := state.ProcessEnvelope(ctx, f.buildFirstEnvelope(t, first, true))
 	require.NoError(t, err)
 
 	second := &protobufs.ServerToAgent{InstanceUid: []byte("second0000000000")}
@@ -275,7 +291,7 @@ func TestUnwrapServerToAgent_WithState_HappyPath(t *testing.T) {
 	state := newAttestationState(f.verifier)
 
 	inner := &protobufs.ServerToAgent{InstanceUid: []byte("envelope-uid0000")}
-	env := f.buildFirstEnvelope(t, inner, false)
+	env := f.buildFirstEnvelope(t, inner, true)
 	envBytes, err := proto.Marshal(env)
 	require.NoError(t, err)
 
@@ -310,7 +326,7 @@ func TestAttestationState_Reset(t *testing.T) {
 
 	// Drive the state through a successful handshake.
 	first := &protobufs.ServerToAgent{InstanceUid: []byte("first00000000000")}
-	_, err := state.ProcessEnvelope(ctx, f.buildFirstEnvelope(t, first, false))
+	_, err := state.ProcessEnvelope(ctx, f.buildFirstEnvelope(t, first, true))
 	require.NoError(t, err)
 	require.True(t, state.firstSeen)
 	require.NotNil(t, state.leaf)
@@ -331,7 +347,7 @@ func TestAttestationState_Reset(t *testing.T) {
 	require.ErrorIs(t, err, ErrMissingTrustChain)
 
 	// A fresh first-message envelope succeeds after Reset.
-	thirdEnv := f.buildFirstEnvelope(t, second, false)
+	thirdEnv := f.buildFirstEnvelope(t, second, true)
 	_, err = state.ProcessEnvelope(ctx, thirdEnv)
 	require.NoError(t, err)
 }

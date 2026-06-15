@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"sync"
@@ -29,10 +30,10 @@ var (
 	// satisfy the handshake.
 	ErrTrustChainErrorReported = errors.New("client: server reported trust chain error")
 
-	// ErrMissingSignature is returned when a SignedServerToAgent after
-	// the first is missing its signature field. Subsequent messages
-	// MUST be signed.
-	ErrMissingSignature = errors.New("client: SignedServerToAgent missing signature on non-first message")
+	// ErrMissingSignature is returned when a SignedServerToAgent is
+	// missing its signature field. Every message MUST be signed,
+	// including the first.
+	ErrMissingSignature = errors.New("client: SignedServerToAgent missing signature")
 
 	// ErrMissingPayload is returned when SignedServerToAgent.payload
 	// is empty. The payload carries the inner ServerToAgent; an empty
@@ -148,9 +149,9 @@ func (s *attestationState) ProcessEnvelope(ctx context.Context, envelope *protob
 		if chainResp.ErrorMessage != "" {
 			return nil, fmt.Errorf("%w: %s", ErrTrustChainErrorReported, chainResp.ErrorMessage)
 		}
-		chainDER := make([][]byte, len(chainResp.CertificateChain))
-		for i, cert := range chainResp.CertificateChain {
-			chainDER[i] = cert.GetDerData()
+		chainDER, err := parsePEMChain(chainResp.CertificateChain)
+		if err != nil {
+			return nil, fmt.Errorf("client: parse trust chain PEM: %w", err)
 		}
 		leaf, err := s.verifier.ValidateChain(ctx, chainDER, time.Now())
 		if err != nil {
@@ -158,21 +159,9 @@ func (s *attestationState) ProcessEnvelope(ctx context.Context, envelope *protob
 		}
 		s.leaf = leaf
 		s.firstSeen = true
-
-		// First message MAY be unsigned per the spec (chain validation
-		// establishes trust at this point). If a signature is present,
-		// verify it as defence in depth — a server that supplies a
-		// signature alongside the chain handshake should produce a
-		// valid one.
-		if len(envelope.Signature) > 0 {
-			if err := s.verifier.Verify(ctx, envelope.Payload, envelope.Signature, leaf); err != nil {
-				return nil, fmt.Errorf("client: verify first message signature: %w", err)
-			}
-		}
-		return envelope.Payload, nil
 	}
 
-	// Subsequent messages: signature MUST be present and verifiable.
+	// Every message — including the first — MUST carry a signature.
 	if len(envelope.Signature) == 0 {
 		return nil, ErrMissingSignature
 	}
@@ -180,6 +169,29 @@ func (s *attestationState) ProcessEnvelope(ctx context.Context, envelope *protob
 		return nil, fmt.Errorf("client: verify signature: %w", err)
 	}
 	return envelope.Payload, nil
+}
+
+// parsePEMChain decodes a concatenated PEM blob into individual DER byte
+// slices ordered intermediates-first, leaf-last — the form expected by
+// signing.Verifier.ValidateChain.
+func parsePEMChain(pemBytes []byte) ([][]byte, error) {
+	var chain [][]byte
+	rest := pemBytes
+	for len(rest) > 0 {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		chain = append(chain, block.Bytes)
+	}
+	if len(chain) == 0 {
+		return nil, errors.New("no CERTIFICATE blocks found in PEM")
+	}
+	return chain, nil
 }
 
 // unwrapServerToAgent is a convenience that combines ProcessEnvelope

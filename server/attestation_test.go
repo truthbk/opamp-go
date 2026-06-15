@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"net/http"
 	"sync/atomic"
@@ -154,12 +155,20 @@ func TestAddOffersAttestationBit_Idempotent(t *testing.T) {
 	require.Equal(t, offersBit, addOffersAttestationBit(offersBit), "no-op when already set")
 }
 
-// derChainFromResponse extracts the DER bytes from a
-// TrustChainResponse for the paired verifier's ValidateChain call.
+// derChainFromResponse decodes the PEM blob in TrustChainResponse into
+// DER byte slices for the paired verifier's ValidateChain call.
 func derChainFromResponse(resp *protobufs.TrustChainResponse) [][]byte {
-	out := make([][]byte, len(resp.CertificateChain))
-	for i, c := range resp.CertificateChain {
-		out[i] = c.GetDerData()
+	var out [][]byte
+	rest := resp.CertificateChain
+	for len(rest) > 0 {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type == "CERTIFICATE" {
+			out = append(out, block.Bytes)
+		}
 	}
 	return out
 }
