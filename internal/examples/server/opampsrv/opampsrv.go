@@ -14,16 +14,23 @@ import (
 	"github.com/open-telemetry/opamp-go/protobufs"
 	"github.com/open-telemetry/opamp-go/server"
 	"github.com/open-telemetry/opamp-go/server/types"
+	"github.com/open-telemetry/opamp-go/signing"
 )
 
 type Server struct {
-	opampSrv server.OpAMPServer
-	agents   *data.Agents
-	logger   *Logger
-	metrics  *metricsTracker
+	opampSrv      server.OpAMPServer
+	agents        *data.Agents
+	logger        *Logger
+	metrics       *metricsTracker
+	payloadSigner signing.Signer
 }
 
-func NewServer(agents *data.Agents, emitMetrics bool) *Server {
+// NewServer creates a new OpAMP server. payloadSigner, when non-nil, enables
+// Message Attestation: every outbound ServerToAgent message is wrapped in a
+// SignedServerToAgent envelope signed by the given signer. Use
+// signing.NewRemoteSigner to delegate signing to an out-of-process policy
+// server as recommended in supplementary-guidelines.md.
+func NewServer(agents *data.Agents, emitMetrics bool, payloadSigner signing.Signer) *Server {
 	logger := &Logger{
 		log.New(
 			log.Default().Writer(),
@@ -38,9 +45,10 @@ func NewServer(agents *data.Agents, emitMetrics bool) *Server {
 	}
 
 	srv := &Server{
-		agents:  agents,
-		logger:  logger,
-		metrics: metrics,
+		agents:        agents,
+		logger:        logger,
+		metrics:       metrics,
+		payloadSigner: payloadSigner,
 	}
 
 	srv.opampSrv = server.New(logger)
@@ -51,6 +59,7 @@ func NewServer(agents *data.Agents, emitMetrics bool) *Server {
 func (srv *Server) Start() {
 	settings := server.StartSettings{
 		Settings: server.Settings{
+			PayloadSigner: srv.payloadSigner,
 			Callbacks: types.Callbacks{
 				OnConnecting: func(request *http.Request) types.ConnectionResponse {
 					return types.ConnectionResponse{

@@ -15,6 +15,7 @@ import (
 	opampinternal "github.com/open-telemetry/opamp-go/internal"
 	"github.com/open-telemetry/opamp-go/internal/examples/agent/agent"
 	"github.com/open-telemetry/opamp-go/internal/examples/config"
+	"github.com/open-telemetry/opamp-go/signing"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/collector/config/configtls"
@@ -42,6 +43,11 @@ type flagConfig struct {
 	// scaleCount = 1 runs a normal agent
 	// scaleCount > 1 runs scale test agents (pre-assigned IDs, no initial cert request)
 	scaleCount uint64
+	// attestationCAFile, when non-empty, enables Message Attestation: every
+	// inbound ServerToAgent must carry a valid signature chaining to the CA
+	// certificate stored at this path. Run internal/examples/policysrv first
+	// to generate the CA and start the signing server.
+	attestationCAFile string
 }
 
 func (cfg flagConfig) verifyArgs() error {
@@ -157,6 +163,10 @@ func loadEnv(cfg *flagConfig) {
 			cfg.scaleCount = count
 		}
 	}
+
+	if s, ok := os.LookupEnv("AGENT_ATTESTATION_CA"); ok {
+		cfg.attestationCAFile = s
+	}
 }
 
 func main() {
@@ -172,6 +182,13 @@ func main() {
 	flag.DurationVar(&cfg.heartbeat, "heartbeat", time.Second*30, "Heartbeat duration (env var: AGENT_HEARTBEAT).")
 	flag.BoolVar(&cfg.quietAgent, "quite-agent", false, "Disable agent logger (env var: AGENT_QUIET).")
 	flag.Uint64Var(&cfg.scaleCount, "scale-count", 1, "The number of agents to start in scale mode (env var: AGENT_SCALE_COUNT).")
+	flag.StringVar(&cfg.attestationCAFile, "attestation-ca", "",
+		"Path to a PEM-encoded CA certificate used to verify signed ServerToAgent messages\n"+
+			"(Message Attestation). When set, the agent declares the\n"+
+			"RequiresPayloadTrustVerification capability and rejects any message whose\n"+
+			"signature does not chain to this CA. Obtain the CA from the policy server's\n"+
+			"/v1/ca endpoint or from /tmp/opamp-policy-ca.pem after running policysrv\n"+
+			"(env var: AGENT_ATTESTATION_CA).")
 
 	flag.Parse()
 	loadEnv(&cfg)
@@ -211,6 +228,17 @@ func main() {
 // If an error is encountered when starting an agent, it is return along with all started agents.
 func runScale(ctx context.Context, cfg flagConfig) ([]*agent.Agent, error) {
 	nopLogger := &opampinternal.NopLogger{}
+
+	var verifier signing.Verifier
+	if cfg.attestationCAFile != "" {
+		v, err := signing.VerifierFromFile(cfg.attestationCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("load attestation CA: %w", err)
+		}
+		verifier = v
+		log.Printf("Message Attestation enabled — trust anchor: %s", cfg.attestationCAFile)
+	}
+
 	agentConfig := &config.AgentConfig{
 		Endpoint:          cfg.endpoint,
 		HeartbeatInterval: &cfg.heartbeat,
@@ -238,6 +266,9 @@ func runScale(ctx context.Context, cfg flagConfig) ([]*agent.Agent, error) {
 		opts := []agent.Option{
 			agent.WithAgentType(cfg.agentType),
 			agent.WithAgentVersion(cfg.agentVersion),
+		}
+		if verifier != nil {
+			opts = append(opts, agent.WithPayloadVerifier(verifier))
 		}
 		if cfg.quietAgent {
 			opts = append(opts, agent.WithLogger(nopLogger))
