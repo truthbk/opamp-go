@@ -30,6 +30,17 @@ var (
 	// satisfy the handshake.
 	ErrTrustChainErrorReported = errors.New("client: server reported trust chain error")
 
+	// ErrSANMismatch is returned when the leaf certificate's Subject
+	// Alternative Name entries do not contain a dNSName or iPAddress
+	// that matches the OpAMP server the Agent is connected to. Per the
+	// spec this is a fatal handshake error.
+	ErrSANMismatch = errors.New("client: leaf certificate SAN does not match server hostname")
+
+	// ErrTOFUAnchorMissing is returned during TOFU enrollment when the
+	// Server's TrustChainResponse does not include the expected
+	// tofu_trust_anchor field.
+	ErrTOFUAnchorMissing = errors.New("client: TOFU enrollment requested but TrustChainResponse.tofu_trust_anchor is absent")
+
 	// ErrMissingSignature is returned when a SignedServerToAgent is
 	// missing its signature field. Every message MUST be signed,
 	// including the first.
@@ -63,7 +74,9 @@ var (
 // format is byte-identical to upstream and no attestationState is
 // created at all; payload trust is simply not negotiated.
 type attestationState struct {
-	verifier signing.Verifier
+	verifier   signing.Verifier
+	serverName string            // hostname for SAN verification
+	tofuStore  signing.TOFUStore // non-nil when in TOFU enrollment mode
 
 	mu        sync.Mutex
 	firstSeen bool
@@ -71,10 +84,11 @@ type attestationState struct {
 }
 
 // newAttestationState constructs a per-connection attestation state.
-// verifier MUST be non-nil; callers without a configured verifier
-// should not construct an attestationState at all.
-func newAttestationState(verifier signing.Verifier) *attestationState {
-	return &attestationState{verifier: verifier}
+// verifier is nil in TOFU enrollment mode (tofuStore non-nil); in that case
+// the verifier is bootstrapped from the first TrustChainResponse.
+// serverName is the hostname (without port) of the OpAMP server.
+func newAttestationState(verifier signing.Verifier, serverName string, tofuStore signing.TOFUStore) *attestationState {
+	return &attestationState{verifier: verifier, serverName: serverName, tofuStore: tofuStore}
 }
 
 // Reset clears the per-connection handshake state. After Reset, the
@@ -106,6 +120,8 @@ func isAttestationFailure(err error) bool {
 	}
 	return errors.Is(err, ErrMissingTrustChain) ||
 		errors.Is(err, ErrTrustChainErrorReported) ||
+		errors.Is(err, ErrSANMismatch) ||
+		errors.Is(err, ErrTOFUAnchorMissing) ||
 		errors.Is(err, ErrMissingSignature) ||
 		errors.Is(err, ErrMissingPayload) ||
 		errors.Is(err, ErrEmptyInnerServerToAgent) ||
@@ -153,9 +169,32 @@ func (s *attestationState) ProcessEnvelope(ctx context.Context, envelope *protob
 		if err != nil {
 			return nil, fmt.Errorf("client: parse trust chain PEM: %w", err)
 		}
+
+		// TOFU enrollment: bootstrap the verifier from the root CA the
+		// Server included in tofu_trust_anchor, then persist it.
+		if s.tofuStore != nil {
+			if len(chainResp.TofuTrustAnchor) == 0 {
+				return nil, ErrTOFUAnchorMissing
+			}
+			v, err := signing.VerifierFromPEM(chainResp.TofuTrustAnchor)
+			if err != nil {
+				return nil, fmt.Errorf("client: TOFU: parse trust anchor: %w", err)
+			}
+			if err := s.tofuStore.Save(chainResp.TofuTrustAnchor); err != nil {
+				return nil, fmt.Errorf("client: TOFU: persist trust anchor: %w", err)
+			}
+			s.verifier = v
+			s.tofuStore = nil // enrolled; store no longer needed this session
+		}
+
 		leaf, err := s.verifier.ValidateChain(ctx, chainDER, time.Now())
 		if err != nil {
 			return nil, fmt.Errorf("client: validate trust chain: %w", err)
+		}
+		if s.serverName != "" {
+			if err := leaf.VerifyHostname(s.serverName); err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrSANMismatch, err)
+			}
 		}
 		s.leaf = leaf
 		s.firstSeen = true

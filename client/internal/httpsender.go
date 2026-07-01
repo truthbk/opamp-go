@@ -130,19 +130,24 @@ func (h *HTTPSender) SetProxy(proxy string, headers http.Header) error {
 // Run continues until ctx is cancelled.
 func (h *HTTPSender) Run(
 	ctx context.Context,
-	url string,
+	serverURL string,
 	callbacks types.Callbacks,
 	clientSyncedState *ClientSyncedState,
 	packagesStateProvider types.PackagesStateProvider,
 	packageSyncMutex *sync.Mutex,
 	reporterInterval time.Duration,
 	payloadVerifier signing.Verifier,
+	tofuStore signing.TOFUStore,
 ) {
-	h.url = url
+	h.url = serverURL
 	h.callbacks = callbacks
 	h.receiveProcessor = newReceivedProcessor(h.logger, callbacks, h, clientSyncedState, packagesStateProvider, packageSyncMutex, reporterInterval)
-	if payloadVerifier != nil {
-		h.attestation = newAttestationState(payloadVerifier)
+	if payloadVerifier != nil || tofuStore != nil {
+		var serverName string
+		if parsed, err := url.Parse(h.url); err == nil {
+			serverName = parsed.Hostname()
+		}
+		h.attestation = newAttestationState(payloadVerifier, serverName, tofuStore)
 	}
 
 	// we need to detect if the redirect was ever set, if not, we want default behaviour

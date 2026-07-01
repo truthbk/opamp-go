@@ -69,14 +69,21 @@ func main() {
 	if err != nil {
 		log.Fatalf("generate CA: %v", err)
 	}
-	leaf, leafKey, err := signing.GenerateLeaf(signing.AlgorithmECDSAP256SHA256, ca, caKey, signing.CertOptions{})
+	leaf, leafKey, err := signing.GenerateLeaf(signing.AlgorithmECDSAP256SHA256, ca, caKey, signing.CertOptions{
+		// SAN required by the spec: the leaf must match the OpAMP distribution server's hostname.
+		// The example server binds to 0.0.0.0:4320; agents may connect by hostname or IP, so
+		// include both. Production deployments set these to the actual hostname(s) or IP(s).
+		DNSNames:    []string{"localhost"},
+		IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
+	})
 	if err != nil {
 		log.Fatalf("generate leaf: %v", err)
 	}
-	signer, err := signing.NewLocalSigner(leafKey, []*x509.Certificate{leaf})
+	localSigner, err := signing.NewLocalSigner(leafKey, []*x509.Certificate{leaf})
 	if err != nil {
 		log.Fatalf("new signer: %v", err)
 	}
+	signer := localSigner.WithRootCA(ca)
 
 	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.Raw})
 	leafPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw})

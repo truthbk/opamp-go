@@ -311,7 +311,8 @@ func (s *server) handleWSConnection(reqCtx context.Context, wsConn *websocket.Co
 		// were rejected pre-negotiation (see ErrSendBeforeNegotiated).
 		if !agentConn.isNegotiated() {
 			if s.settings.PayloadSigner != nil && agentRequiresAttestation(request.Capabilities) {
-				state, err := newConnectionSigningState(msgContext, s.settings.PayloadSigner)
+				tofu := agentRequestsTOFU(request.Capabilities)
+				state, err := newConnectionSigningState(msgContext, s.settings.PayloadSigner, tofu)
 				if err != nil {
 					s.logger.Errorf(msgContext, "Cannot fetch signing certificate chain: %v", err)
 					break
@@ -464,7 +465,8 @@ func (s *server) handlePlainHTTPRequest(req *http.Request, w http.ResponseWriter
 		response.Capabilities = addOffersAttestationBit(response.Capabilities)
 
 		if agentRequiresAttestation(request.Capabilities) {
-			state, sigErr := newConnectionSigningState(req.Context(), s.settings.PayloadSigner)
+			tofu := agentRequestsTOFU(request.Capabilities)
+			state, sigErr := newConnectionSigningState(req.Context(), s.settings.PayloadSigner, tofu)
 			if sigErr != nil {
 				s.logger.Errorf(req.Context(), "Cannot fetch signing certificate chain: %v", sigErr)
 				w.WriteHeader(http.StatusInternalServerError)

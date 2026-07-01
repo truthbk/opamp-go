@@ -23,16 +23,18 @@ import (
 // whether the chain has already been delivered on this connection so
 // that exactly one outbound envelope carries it.
 type connectionSigningState struct {
-	signer    signing.Signer
-	chainDER  [][]byte // snapshot
-	firstSent atomic.Bool
+	signer        signing.Signer
+	chainDER      [][]byte // snapshot
+	tofuAnchorPEM []byte   // non-empty iff this connection is a TOFU enrollment
+	tofuError     string   // non-empty when TOFU requested but anchor unavailable
+	firstSent     atomic.Bool
 }
 
 // newConnectionSigningState constructs the per-connection state by
-// asking the signer for its current chain. Errors here propagate to
-// the server and prevent the connection from being established with
-// signing enabled.
-func newConnectionSigningState(ctx context.Context, signer signing.Signer) (*connectionSigningState, error) {
+// asking the signer for its current chain. When tofu is true the signer
+// must also implement TrustAnchorProvider; the root CA is fetched and
+// stored to be included in the first outbound TrustChainResponse.
+func newConnectionSigningState(ctx context.Context, signer signing.Signer, tofu bool) (*connectionSigningState, error) {
 	if signer == nil {
 		return nil, fmt.Errorf("server: nil signer")
 	}
@@ -40,10 +42,24 @@ func newConnectionSigningState(ctx context.Context, signer signing.Signer) (*con
 	if err != nil {
 		return nil, fmt.Errorf("server: fetch signing chain: %w", err)
 	}
-	return &connectionSigningState{
+	state := &connectionSigningState{
 		signer:   signer,
 		chainDER: chain,
-	}, nil
+	}
+	if tofu {
+		tap, ok := signer.(signing.TrustAnchorProvider)
+		if !ok {
+			state.tofuError = "server cannot provide TOFU trust anchor: signer does not implement TrustAnchorProvider"
+		} else {
+			anchorPEM, err := tap.TrustAnchorPEM(ctx)
+			if err != nil {
+				state.tofuError = fmt.Sprintf("server cannot provide TOFU trust anchor: %v", err)
+			} else {
+				state.tofuAnchorPEM = anchorPEM
+			}
+		}
+	}
+	return state, nil
 }
 
 // signOutgoing produces a SignedServerToAgent envelope wrapping msg.
@@ -68,11 +84,23 @@ func (s *connectionSigningState) signOutgoing(ctx context.Context, msg *protobuf
 	// transitioned firstSent from false to true — guaranteeing exactly
 	// one envelope carries the trust chain across concurrent callers.
 	if s.firstSent.CompareAndSwap(false, true) {
-		var pemChain []byte
-		for _, der := range s.chainDER {
-			pemChain = append(pemChain, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...)
+		if s.tofuError != "" {
+			// TOFU was requested but the server cannot fulfil it. Per the
+			// spec the server MUST set error_message; the agent will
+			// terminate the connection on receipt.
+			env.TrustChainResponse = &protobufs.TrustChainResponse{
+				ErrorMessage: s.tofuError,
+			}
+		} else {
+			var pemChain []byte
+			for _, der := range s.chainDER {
+				pemChain = append(pemChain, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...)
+			}
+			env.TrustChainResponse = &protobufs.TrustChainResponse{
+				CertificateChain: pemChain,
+				TofuTrustAnchor:  s.tofuAnchorPEM, // nil unless TOFU enrollment
+			}
 		}
-		env.TrustChainResponse = &protobufs.TrustChainResponse{CertificateChain: pemChain}
 	}
 	return env, nil
 }
@@ -82,6 +110,12 @@ func (s *connectionSigningState) signOutgoing(ctx context.Context, msg *protobuf
 // verification.
 func agentRequiresAttestation(capabilities uint64) bool {
 	return capabilities&uint64(protobufs.AgentCapabilities_AgentCapabilities_RequiresPayloadTrustVerification) != 0
+}
+
+// agentRequestsTOFU reports whether the agent is requesting TOFU
+// enrollment (no pre-configured trust anchor; needs the root CA).
+func agentRequestsTOFU(capabilities uint64) bool {
+	return capabilities&uint64(protobufs.AgentCapabilities_AgentCapabilities_AcceptsPayloadTrustAnchorTOFU) != 0
 }
 
 // addOffersAttestationBit returns capabilities with the

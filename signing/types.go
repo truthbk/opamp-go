@@ -74,6 +74,19 @@ type Signer interface {
 	ChainDER(ctx context.Context) ([][]byte, error)
 }
 
+// TrustAnchorProvider is an optional interface that [Signer] implementations
+// may satisfy when they also hold the root CA certificate. The OpAMP server
+// checks for this interface (via type assertion) to populate
+// trust_chain_response.tofu_trust_anchor during TOFU enrollment.
+// Signers that do not hold the root CA (for example, a remote HSM-backed
+// signer that only exposes the leaf chain) need not implement this interface;
+// TOFU enrollment will simply not be available for those deployments.
+type TrustAnchorProvider interface {
+	// TrustAnchorPEM returns the PEM-encoded root CA certificate that Agents
+	// should use as their payload trust anchor.
+	TrustAnchorPEM(ctx context.Context) ([]byte, error)
+}
+
 // Verifier validates a delivered trust chain and verifies detached
 // signatures against the resulting leaf certificate.
 //

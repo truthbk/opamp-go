@@ -53,7 +53,7 @@ func TestConnectionSigningState_FirstAndSubsequent(t *testing.T) {
 	ctx := context.Background()
 	f := newServerSigningFixture(t)
 
-	state, err := newConnectionSigningState(ctx, f.signer)
+	state, err := newConnectionSigningState(ctx, f.signer, false)
 	require.NoError(t, err)
 
 	first := &protobufs.ServerToAgent{InstanceUid: []byte("first00000000000")}
@@ -86,7 +86,7 @@ func TestConnectionSigningState_FirstAndSubsequent(t *testing.T) {
 func TestConnectionSigningState_ConcurrentFirstSend(t *testing.T) {
 	ctx := context.Background()
 	f := newServerSigningFixture(t)
-	state, err := newConnectionSigningState(ctx, f.signer)
+	state, err := newConnectionSigningState(ctx, f.signer, false)
 	require.NoError(t, err)
 
 	// Drive two concurrent calls; exactly one should carry the chain.
@@ -119,7 +119,7 @@ func TestConnectionSigningState_ConcurrentFirstSend(t *testing.T) {
 // TestConnectionSigningState_NilSigner rejects a nil signer at
 // construction.
 func TestConnectionSigningState_NilSigner(t *testing.T) {
-	_, err := newConnectionSigningState(context.Background(), nil)
+	_, err := newConnectionSigningState(context.Background(), nil, false)
 	require.Error(t, err)
 }
 
@@ -127,7 +127,7 @@ func TestConnectionSigningState_NilSigner(t *testing.T) {
 // signer's ChainDER call.
 func TestConnectionSigningState_SignerError(t *testing.T) {
 	bad := &failingSigner{chainErr: errors.New("chain unavailable")}
-	_, err := newConnectionSigningState(context.Background(), bad)
+	_, err := newConnectionSigningState(context.Background(), bad, false)
 	require.Error(t, err)
 }
 
@@ -350,7 +350,7 @@ func TestSignOutgoing_MidStreamSignFailure_PropagatesError(t *testing.T) {
 	signErr := errors.New("e2e test: synthetic signer failure")
 	bad := &failingSigner{signErr: signErr}
 
-	state, err := newConnectionSigningState(ctx, bad)
+	state, err := newConnectionSigningState(ctx, bad, false)
 	require.NoError(t, err, "ChainDER should succeed; the failure is on Sign")
 
 	_, err = state.signOutgoing(ctx, &protobufs.ServerToAgent{InstanceUid: testInstanceUid})

@@ -87,7 +87,7 @@ func (f attestationFixture) buildSignedEnvelope(t *testing.T, inner *protobufs.S
 // signature verification (subsequent envelopes).
 func TestAttestationState_FirstAndSubsequent(t *testing.T) {
 	f := newAttestationFixture(t)
-	state := newAttestationState(f.verifier)
+	state := newAttestationState(f.verifier, "", nil)
 	ctx := context.Background()
 
 	first := &protobufs.ServerToAgent{InstanceUid: []byte("first-msg-uid000")}
@@ -118,7 +118,7 @@ func TestAttestationState_FirstAndSubsequent(t *testing.T) {
 // envelope's signature is verified against the freshly validated leaf.
 func TestAttestationState_FirstMessageMustBeSigned(t *testing.T) {
 	f := newAttestationFixture(t)
-	state := newAttestationState(f.verifier)
+	state := newAttestationState(f.verifier, "", nil)
 	ctx := context.Background()
 
 	inner := &protobufs.ServerToAgent{InstanceUid: []byte("signed-first-uid")}
@@ -132,7 +132,7 @@ func TestAttestationState_FirstMessageMustBeSigned(t *testing.T) {
 // message is rejected when its signature is absent.
 func TestAttestationState_MissingSignatureOnFirst(t *testing.T) {
 	f := newAttestationFixture(t)
-	state := newAttestationState(f.verifier)
+	state := newAttestationState(f.verifier, "", nil)
 	ctx := context.Background()
 
 	inner := &protobufs.ServerToAgent{InstanceUid: []byte("no-sig-first-uid")}
@@ -147,7 +147,7 @@ func TestAttestationState_MissingSignatureOnFirst(t *testing.T) {
 // state rejects it.
 func TestAttestationState_FirstMessageSignedButTampered(t *testing.T) {
 	f := newAttestationFixture(t)
-	state := newAttestationState(f.verifier)
+	state := newAttestationState(f.verifier, "", nil)
 	ctx := context.Background()
 
 	inner := &protobufs.ServerToAgent{InstanceUid: []byte("tampered-first0")}
@@ -163,7 +163,7 @@ func TestAttestationState_FirstMessageSignedButTampered(t *testing.T) {
 // when the first envelope lacks trust_chain_response.
 func TestAttestationState_MissingTrustChain(t *testing.T) {
 	f := newAttestationFixture(t)
-	state := newAttestationState(f.verifier)
+	state := newAttestationState(f.verifier, "", nil)
 	ctx := context.Background()
 
 	inner := &protobufs.ServerToAgent{InstanceUid: []byte("no-chain-uid000")}
@@ -180,7 +180,7 @@ func TestAttestationState_MissingTrustChain(t *testing.T) {
 // ErrTrustChainErrorReported.
 func TestAttestationState_TrustChainErrorReported(t *testing.T) {
 	f := newAttestationFixture(t)
-	state := newAttestationState(f.verifier)
+	state := newAttestationState(f.verifier, "", nil)
 	ctx := context.Background()
 
 	inner := &protobufs.ServerToAgent{InstanceUid: []byte("err-msg-uid00000")}
@@ -204,7 +204,7 @@ func TestAttestationState_UnknownCA(t *testing.T) {
 	// Build a SECOND fixture with a different CA — its envelope won't
 	// validate against f.verifier.
 	other := newAttestationFixture(t)
-	state := newAttestationState(f.verifier)
+	state := newAttestationState(f.verifier, "", nil)
 	ctx := context.Background()
 
 	inner := &protobufs.ServerToAgent{InstanceUid: []byte("unknown-ca-uid00")}
@@ -220,7 +220,7 @@ func TestAttestationState_UnknownCA(t *testing.T) {
 // rejected.
 func TestAttestationState_MissingSignatureOnSubsequent(t *testing.T) {
 	f := newAttestationFixture(t)
-	state := newAttestationState(f.verifier)
+	state := newAttestationState(f.verifier, "", nil)
 	ctx := context.Background()
 
 	first := &protobufs.ServerToAgent{InstanceUid: []byte("first00000000000")}
@@ -240,7 +240,7 @@ func TestAttestationState_MissingSignatureOnSubsequent(t *testing.T) {
 // flipped byte in the signature is rejected.
 func TestAttestationState_TamperedSignatureOnSubsequent(t *testing.T) {
 	f := newAttestationFixture(t)
-	state := newAttestationState(f.verifier)
+	state := newAttestationState(f.verifier, "", nil)
 	ctx := context.Background()
 
 	first := &protobufs.ServerToAgent{InstanceUid: []byte("first00000000000")}
@@ -261,7 +261,7 @@ func TestAttestationState_TamperedSignatureOnSubsequent(t *testing.T) {
 // hide signaling issues.
 func TestAttestationState_EmptyPayload(t *testing.T) {
 	f := newAttestationFixture(t)
-	state := newAttestationState(f.verifier)
+	state := newAttestationState(f.verifier, "", nil)
 	ctx := context.Background()
 
 	env := &protobufs.SignedServerToAgent{}
@@ -288,7 +288,7 @@ func TestUnwrapServerToAgent_NilState_PassThrough(t *testing.T) {
 // returned.
 func TestUnwrapServerToAgent_WithState_HappyPath(t *testing.T) {
 	f := newAttestationFixture(t)
-	state := newAttestationState(f.verifier)
+	state := newAttestationState(f.verifier, "", nil)
 
 	inner := &protobufs.ServerToAgent{InstanceUid: []byte("envelope-uid0000")}
 	env := f.buildFirstEnvelope(t, inner, true)
@@ -305,7 +305,7 @@ func TestUnwrapServerToAgent_WithState_HappyPath(t *testing.T) {
 // is negotiated are rejected.
 func TestUnwrapServerToAgent_WithState_GarbageBytes(t *testing.T) {
 	f := newAttestationFixture(t)
-	state := newAttestationState(f.verifier)
+	state := newAttestationState(f.verifier, "", nil)
 
 	var msg protobufs.ServerToAgent
 	// Bytes that don't decode as SignedServerToAgent — proto3 is
@@ -321,7 +321,7 @@ func TestUnwrapServerToAgent_WithState_GarbageBytes(t *testing.T) {
 // poll.
 func TestAttestationState_Reset(t *testing.T) {
 	f := newAttestationFixture(t)
-	state := newAttestationState(f.verifier)
+	state := newAttestationState(f.verifier, "", nil)
 	ctx := context.Background()
 
 	// Drive the state through a successful handshake.

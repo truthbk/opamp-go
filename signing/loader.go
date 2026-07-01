@@ -40,6 +40,20 @@ func VerifierFromFile(caPath string) (*LocalVerifier, error) {
 	return NewLocalVerifier(pool)
 }
 
+// VerifierFromPEM constructs a LocalVerifier whose trust anchor pool is
+// populated from pemBytes. Useful when the CA certificate bytes are already
+// in memory (for example, after a TOFU enrollment).
+func VerifierFromPEM(pemBytes []byte) (*LocalVerifier, error) {
+	if len(pemBytes) == 0 {
+		return nil, fmt.Errorf("%w: empty PEM bytes", ErrLoadCAFile)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return nil, fmt.Errorf("%w: no valid PEM certificates in supplied bytes", ErrLoadCAFile)
+	}
+	return NewLocalVerifier(pool)
+}
+
 // LocalSignerFromFiles constructs a LocalSigner from PEM-encoded files:
 //
 //   - keyPath:   path to a PEM file containing the leaf signing private

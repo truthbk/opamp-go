@@ -93,6 +93,10 @@ type Agent struct {
 	// inbound ServerToAgent message must arrive in a SignedServerToAgent
 	// envelope whose signature chains to this verifier's trust anchor.
 	payloadVerifier signing.Verifier
+
+	// payloadTOFUStore, when non-nil, enables TOFU enrollment for the
+	// payload trust anchor. Mutually exclusive with payloadVerifier.
+	payloadTOFUStore signing.TOFUStore
 }
 
 type proxySettings struct {
@@ -153,6 +157,16 @@ func WithPayloadVerifier(v signing.Verifier) Option {
 	}
 }
 
+// WithPayloadTOFUStore enables TOFU enrollment for the payload trust anchor.
+// On first connection the agent accepts and persists the root CA delivered by
+// the server; on subsequent connections the persisted anchor is used directly.
+// Mutually exclusive with WithPayloadVerifier.
+func WithPayloadTOFUStore(s signing.TOFUStore) Option {
+	return func(agent *Agent) {
+		agent.payloadTOFUStore = s
+	}
+}
+
 func NewAgent(agentConfig *config.AgentConfig, options ...Option) *Agent {
 	agent := &Agent{
 		logger:          &Logger{Logger: log.Default()},
@@ -206,6 +220,7 @@ func (agent *Agent) connect(ops ...settingsOp) error {
 		HeartbeatInterval: agent.agentConfig.HeartbeatInterval,
 		InstanceUid:       types.InstanceUid(agent.instanceId),
 		PayloadVerifier:   agent.payloadVerifier,
+		PayloadTOFUStore:  agent.payloadTOFUStore,
 		Callbacks: types.Callbacks{
 			OnConnect: func(ctx context.Context) {
 				agent.logger.Debugf(ctx, "Connected to the server.")
@@ -250,6 +265,9 @@ func (agent *Agent) connect(ops ...settingsOp) error {
 		protobufs.AgentCapabilities_AgentCapabilities_ReportsConnectionSettingsStatus
 	if agent.payloadVerifier != nil {
 		supportedCapabilities |= protobufs.AgentCapabilities_AgentCapabilities_RequiresPayloadTrustVerification
+	} else if agent.payloadTOFUStore != nil {
+		supportedCapabilities |= protobufs.AgentCapabilities_AgentCapabilities_RequiresPayloadTrustVerification |
+			protobufs.AgentCapabilities_AgentCapabilities_AcceptsPayloadTrustAnchorTOFU
 	}
 	err = agent.client.SetCapabilities(&supportedCapabilities)
 	if err != nil {

@@ -443,30 +443,40 @@ const (
 	// If the Server does not offer this capability, the Agent MUST terminate
 	// the connection. See the Message Attestation section of the specification.
 	// Status: [Development]
-	AgentCapabilities_AgentCapabilities_RequiresPayloadTrustVerification AgentCapabilities = 65536 // Add new capabilities here, continuing with the least significant unused bit.
+	AgentCapabilities_AgentCapabilities_RequiresPayloadTrustVerification AgentCapabilities = 65536
+	// The Agent supports Trust On First Use (TOFU) enrollment for the payload
+	// trust anchor. When set alongside
+	// AgentCapabilities_RequiresPayloadTrustVerification it signals that the
+	// Agent has no pre-configured trust anchor and asks the Server to include
+	// the root CA in trust_chain_response.tofu_trust_anchor so the Agent can
+	// bootstrap and persist it. MUST NOT be set if the Agent already has a
+	// persisted or operator-configured trust anchor.
+	// Status: [Development]
+	AgentCapabilities_AgentCapabilities_AcceptsPayloadTrustAnchorTOFU AgentCapabilities = 131072 // Add new capabilities here, continuing with the least significant unused bit.
 )
 
 // Enum value maps for AgentCapabilities.
 var (
 	AgentCapabilities_name = map[int32]string{
-		0:     "AgentCapabilities_Unspecified",
-		1:     "AgentCapabilities_ReportsStatus",
-		2:     "AgentCapabilities_AcceptsRemoteConfig",
-		4:     "AgentCapabilities_ReportsEffectiveConfig",
-		8:     "AgentCapabilities_AcceptsPackages",
-		16:    "AgentCapabilities_ReportsPackageStatuses",
-		32:    "AgentCapabilities_ReportsOwnTraces",
-		64:    "AgentCapabilities_ReportsOwnMetrics",
-		128:   "AgentCapabilities_ReportsOwnLogs",
-		256:   "AgentCapabilities_AcceptsOpAMPConnectionSettings",
-		512:   "AgentCapabilities_AcceptsOtherConnectionSettings",
-		1024:  "AgentCapabilities_AcceptsRestartCommand",
-		2048:  "AgentCapabilities_ReportsHealth",
-		4096:  "AgentCapabilities_ReportsRemoteConfig",
-		8192:  "AgentCapabilities_ReportsHeartbeat",
-		16384: "AgentCapabilities_ReportsAvailableComponents",
-		32768: "AgentCapabilities_ReportsConnectionSettingsStatus",
-		65536: "AgentCapabilities_RequiresPayloadTrustVerification",
+		0:      "AgentCapabilities_Unspecified",
+		1:      "AgentCapabilities_ReportsStatus",
+		2:      "AgentCapabilities_AcceptsRemoteConfig",
+		4:      "AgentCapabilities_ReportsEffectiveConfig",
+		8:      "AgentCapabilities_AcceptsPackages",
+		16:     "AgentCapabilities_ReportsPackageStatuses",
+		32:     "AgentCapabilities_ReportsOwnTraces",
+		64:     "AgentCapabilities_ReportsOwnMetrics",
+		128:    "AgentCapabilities_ReportsOwnLogs",
+		256:    "AgentCapabilities_AcceptsOpAMPConnectionSettings",
+		512:    "AgentCapabilities_AcceptsOtherConnectionSettings",
+		1024:   "AgentCapabilities_AcceptsRestartCommand",
+		2048:   "AgentCapabilities_ReportsHealth",
+		4096:   "AgentCapabilities_ReportsRemoteConfig",
+		8192:   "AgentCapabilities_ReportsHeartbeat",
+		16384:  "AgentCapabilities_ReportsAvailableComponents",
+		32768:  "AgentCapabilities_ReportsConnectionSettingsStatus",
+		65536:  "AgentCapabilities_RequiresPayloadTrustVerification",
+		131072: "AgentCapabilities_AcceptsPayloadTrustAnchorTOFU",
 	}
 	AgentCapabilities_value = map[string]int32{
 		"AgentCapabilities_Unspecified":                      0,
@@ -487,6 +497,7 @@ var (
 		"AgentCapabilities_ReportsAvailableComponents":       16384,
 		"AgentCapabilities_ReportsConnectionSettingsStatus":  32768,
 		"AgentCapabilities_RequiresPayloadTrustVerification": 65536,
+		"AgentCapabilities_AcceptsPayloadTrustAnchorTOFU":    131072,
 	}
 )
 
@@ -1397,9 +1408,20 @@ type TrustChainResponse struct {
 	// Human-readable error message indicating why the Server could not
 	// satisfy the trust chain request. If error_message is set, the Agent
 	// MUST terminate the connection.
-	ErrorMessage  string `protobuf:"bytes,2,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ErrorMessage string `protobuf:"bytes,2,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	// PEM-encoded root CA certificate used as the payload trust anchor.
+	// Set only during Trust On First Use (TOFU) enrollment: the Server
+	// includes this when the Agent has advertised
+	// AgentCapabilities_AcceptsPayloadTrustAnchorTOFU and has no
+	// pre-configured trust anchor. The Agent MUST persist this certificate
+	// and use it as the payload trust anchor for all subsequent connections.
+	// The Agent MUST NOT update a previously persisted or operator-configured
+	// trust anchor. If the Agent has a pre-configured trust anchor this
+	// field MUST be ignored.
+	// Status: [Development]
+	TofuTrustAnchor []byte `protobuf:"bytes,3,opt,name=tofu_trust_anchor,json=tofuTrustAnchor,proto3" json:"tofu_trust_anchor,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *TrustChainResponse) Reset() {
@@ -1444,6 +1466,13 @@ func (x *TrustChainResponse) GetErrorMessage() string {
 		return x.ErrorMessage
 	}
 	return ""
+}
+
+func (x *TrustChainResponse) GetTofuTrustAnchor() []byte {
+	if x != nil {
+		return x.TofuTrustAnchor
+	}
+	return nil
 }
 
 // SignedServerToAgent wraps a ServerToAgent message when the payload trust
@@ -3743,10 +3772,11 @@ const file_opamp_proto_rawDesc = "" +
 	"\acommand\x18\t \x01(\v2$.opamp.proto.v1.ServerToAgentCommandR\acommand\x12S\n" +
 	"\x13custom_capabilities\x18\n" +
 	" \x01(\v2\".opamp.proto.v1.CustomCapabilitiesR\x12customCapabilities\x12D\n" +
-	"\x0ecustom_message\x18\v \x01(\v2\x1d.opamp.proto.v1.CustomMessageR\rcustomMessageJ\x04\b\f\x10\rJ\x04\b\r\x10\x0eJ\x04\b\x0e\x10\x0fJ\x04\b\x0f\x10\x10J\x04\b\x10\x10\x11R\x14trust_chain_responseR\tsignatureR\apayload\"f\n" +
+	"\x0ecustom_message\x18\v \x01(\v2\x1d.opamp.proto.v1.CustomMessageR\rcustomMessageJ\x04\b\f\x10\rJ\x04\b\r\x10\x0eJ\x04\b\x0e\x10\x0fJ\x04\b\x0f\x10\x10J\x04\b\x10\x10\x11R\x14trust_chain_responseR\tsignatureR\apayload\"\x92\x01\n" +
 	"\x12TrustChainResponse\x12+\n" +
 	"\x11certificate_chain\x18\x01 \x01(\fR\x10certificateChain\x12#\n" +
-	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage\"\xa3\x01\n" +
+	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage\x12*\n" +
+	"\x11tofu_trust_anchor\x18\x03 \x01(\fR\x0ftofuTrustAnchor\"\xa3\x01\n" +
 	"\x13SignedServerToAgent\x12\x18\n" +
 	"\apayload\x18\x0e \x01(\fR\apayload\x12\x1c\n" +
 	"\tsignature\x18\x0f \x01(\fR\tsignature\x12T\n" +
@@ -3926,7 +3956,7 @@ const file_opamp_proto_rawDesc = "" +
 	"\"ServerErrorResponseType_BadRequest\x10\x01\x12'\n" +
 	"#ServerErrorResponseType_Unavailable\x10\x02*&\n" +
 	"\vCommandType\x12\x17\n" +
-	"\x13CommandType_Restart\x10\x00*\xbf\x06\n" +
+	"\x13CommandType_Restart\x10\x00*\xf6\x06\n" +
 	"\x11AgentCapabilities\x12!\n" +
 	"\x1dAgentCapabilities_Unspecified\x10\x00\x12#\n" +
 	"\x1fAgentCapabilities_ReportsStatus\x10\x01\x12)\n" +
@@ -3945,7 +3975,8 @@ const file_opamp_proto_rawDesc = "" +
 	"\"AgentCapabilities_ReportsHeartbeat\x10\x80@\x122\n" +
 	",AgentCapabilities_ReportsAvailableComponents\x10\x80\x80\x01\x127\n" +
 	"1AgentCapabilities_ReportsConnectionSettingsStatus\x10\x80\x80\x02\x128\n" +
-	"2AgentCapabilities_RequiresPayloadTrustVerification\x10\x80\x80\x04*\xba\x01\n" +
+	"2AgentCapabilities_RequiresPayloadTrustVerification\x10\x80\x80\x04\x125\n" +
+	"/AgentCapabilities_AcceptsPayloadTrustAnchorTOFU\x10\x80\x80\b*\xba\x01\n" +
 	"\x1aConnectionSettingsStatuses\x12$\n" +
 	" ConnectionSettingsStatuses_UNSET\x10\x00\x12&\n" +
 	"\"ConnectionSettingsStatuses_APPLIED\x10\x01\x12'\n" +

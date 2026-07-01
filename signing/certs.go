@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"fmt"
 	"math/big"
+	"net"
 	"time"
 )
 
@@ -26,6 +27,16 @@ type CertOptions struct {
 	NotAfter time.Time
 	// CommonName overrides the certificate's Subject CommonName.
 	CommonName string
+	// DNSNames sets the dNSName Subject Alternative Name entries on the
+	// leaf certificate. Per the OpAMP Message Attestation spec the leaf
+	// MUST include a SAN that matches the OpAMP distribution server's
+	// hostname so the Agent can bind the signing certificate to a
+	// specific server during the connection-time handshake.
+	DNSNames []string
+	// IPAddresses sets the iPAddress Subject Alternative Name entries
+	// on the leaf certificate. Use when the Agent connects to the
+	// OpAMP server by IP address rather than hostname.
+	IPAddresses []net.IP
 }
 
 func (o CertOptions) notBefore() time.Time {
@@ -117,6 +128,8 @@ func GenerateLeaf(alg Algorithm, ca *x509.Certificate, caKey crypto.Signer, opts
 		KeyUsage:           x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:        []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
 		SignatureAlgorithm: sigAlg,
+		DNSNames:           opts.DNSNames,
+		IPAddresses:        opts.IPAddresses,
 	}
 
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, pub, caKey)

@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"sync"
 	"time"
 
@@ -54,6 +55,8 @@ func NewWSReceiver(
 	packageSyncMutex *sync.Mutex,
 	reporterInterval time.Duration,
 	payloadVerifier signing.Verifier,
+	serverURL string,
+	tofuStore signing.TOFUStore,
 ) *wsReceiver {
 	w := &wsReceiver{
 		conn:      conn,
@@ -63,8 +66,12 @@ func NewWSReceiver(
 		processor: newReceivedProcessor(logger, callbacks, sender, clientSyncedState, packagesStateProvider, packageSyncMutex, reporterInterval),
 		stopped:   make(chan struct{}),
 	}
-	if payloadVerifier != nil {
-		w.attestation = newAttestationState(payloadVerifier)
+	if payloadVerifier != nil || tofuStore != nil {
+		var serverName string
+		if parsed, err := url.Parse(serverURL); err == nil {
+			serverName = parsed.Hostname()
+		}
+		w.attestation = newAttestationState(payloadVerifier, serverName, tofuStore)
 	}
 
 	return w

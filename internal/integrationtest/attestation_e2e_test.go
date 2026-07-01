@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -67,6 +68,10 @@ func newFixture(t *testing.T, alg signing.Algorithm) e2eFixture {
 // need an expired leaf, a custom CN, etc. use this directly.
 func newFixtureWithLeafOpts(t *testing.T, alg signing.Algorithm, leafOpts signing.CertOptions) e2eFixture {
 	t.Helper()
+	// All e2e tests connect to 127.0.0.1; include it as an IP SAN so the
+	// client-side SAN check passes. Callers that need to test SAN-mismatch
+	// rejection should construct the signing state directly instead.
+	leafOpts.IPAddresses = append(leafOpts.IPAddresses, net.ParseIP("127.0.0.1"))
 	ca, caKey, err := signing.GenerateCA(alg, signing.CertOptions{})
 	require.NoError(t, err)
 	leaf, leafKey, err := signing.GenerateLeaf(alg, ca, caKey, leafOpts)

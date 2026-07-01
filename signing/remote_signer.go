@@ -34,6 +34,7 @@ type RemoteSigner struct {
 }
 
 var _ Signer = (*RemoteSigner)(nil)
+var _ TrustAnchorProvider = (*RemoteSigner)(nil)
 
 // NewRemoteSigner returns a RemoteSigner that calls the signing service at
 // baseURL (e.g. "http://policy-server:4322"). A 10-second per-request
@@ -67,6 +68,29 @@ func (s *RemoteSigner) Sign(ctx context.Context, payload []byte) ([]byte, error)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("remote signer: sign returned HTTP %d: %s", resp.StatusCode, body)
+	}
+	return body, nil
+}
+
+// TrustAnchorPEM implements [TrustAnchorProvider] by GET-ing /v1/ca on the
+// remote policy server. The response MUST be a PEM-encoded CA certificate.
+func (s *RemoteSigner) TrustAnchorPEM(ctx context.Context) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		s.baseURL+"/v1/ca", nil)
+	if err != nil {
+		return nil, fmt.Errorf("remote signer: build CA request: %w", err)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("remote signer: CA request: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("remote signer: read CA response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("remote signer: CA returned HTTP %d: %s", resp.StatusCode, body)
 	}
 	return body, nil
 }

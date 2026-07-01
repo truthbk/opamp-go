@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 )
 
@@ -25,9 +26,10 @@ var ErrNilKey = errors.New("signing: nil private key")
 // implementations in the Go standard library are themselves
 // concurrency-safe.
 type LocalSigner struct {
-	key      crypto.Signer
-	alg      Algorithm
-	chainDER [][]byte
+	key       crypto.Signer
+	alg       Algorithm
+	chainDER  [][]byte
+	rootCADER []byte // set via WithRootCA; nil unless TOFU is supported
 }
 
 // NewLocalSigner constructs a LocalSigner from the supplied private
@@ -104,4 +106,25 @@ func (s *LocalSigner) ChainDER(ctx context.Context) ([][]byte, error) {
 // from the leaf certificate). Exposed for diagnostics and tests.
 func (s *LocalSigner) Algorithm() Algorithm {
 	return s.alg
+}
+
+// WithRootCA attaches the root CA certificate to this signer, enabling
+// [TrustAnchorProvider] support. The root CA is included in
+// trust_chain_response.tofu_trust_anchor during TOFU enrollment so that
+// Agents with no pre-configured trust anchor can bootstrap and persist it.
+// Returns the receiver for chaining.
+func (s *LocalSigner) WithRootCA(ca *x509.Certificate) *LocalSigner {
+	der := make([]byte, len(ca.Raw))
+	copy(der, ca.Raw)
+	s.rootCADER = der
+	return s
+}
+
+// TrustAnchorPEM implements [TrustAnchorProvider]. Returns the PEM-encoded
+// root CA set by [WithRootCA]. Returns an error if WithRootCA was not called.
+func (s *LocalSigner) TrustAnchorPEM(_ context.Context) ([]byte, error) {
+	if len(s.rootCADER) == 0 {
+		return nil, errors.New("signing: no root CA configured on LocalSigner (call WithRootCA first)")
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: s.rootCADER}), nil
 }

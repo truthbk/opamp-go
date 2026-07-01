@@ -69,6 +69,29 @@ type StartSettings struct {
 	// one from a PEM-encoded CA bundle.
 	PayloadVerifier signing.Verifier
 
+	// PayloadTOFUStore enables Trust On First Use (TOFU) enrollment for the
+	// payload trust anchor. Mutually exclusive with PayloadVerifier: if
+	// PayloadVerifier is also set it takes precedence and PayloadTOFUStore
+	// is ignored.
+	//
+	// On startup the client calls PayloadTOFUStore.Load():
+	//   - If a trust anchor is returned, it is used as PayloadVerifier for
+	//     this session (normal attestation path).
+	//   - If no anchor is stored yet, the client advertises
+	//     AgentCapabilities_AcceptsPayloadTrustAnchorTOFU alongside
+	//     AgentCapabilities_RequiresPayloadTrustVerification, accepts the
+	//     root CA from the first TrustChainResponse.tofu_trust_anchor, and
+	//     persists it via PayloadTOFUStore.Save().
+	//
+	// WARNING: TOFU provides no security on the first connection; a
+	// compromised distribution server can install an attacker-controlled
+	// trust anchor. Disable by default and enable only for environments
+	// where the first connection is considered sufficiently trusted.
+	// Requires persistent storage across restarts — agents running in
+	// stateless container environments without a persistent volume will
+	// repeat TOFU enrollment on every restart.
+	PayloadTOFUStore signing.TOFUStore
+
 	// Defines the capabilities of the Agent. AgentCapabilities_ReportsStatus bit does not need to
 	// be set in this field, it will be set automatically since it is required by OpAMP protocol.
 	// Deprecated: Use client.SetCapabilities() instead.
