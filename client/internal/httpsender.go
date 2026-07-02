@@ -158,13 +158,36 @@ func (h *HTTPSender) Run(
 		}
 	}
 
+	// attestBackoff mirrors the pattern used by the WebSocket client's
+	// runUntilStopped: attestation failures at the application level
+	// are distinct from transport errors (the TCP connection is fine,
+	// the server just failed verification). Without a separate backoff
+	// the agent would retry at the full polling rate — up to 1 req/s
+	// for aggressive heartbeat intervals — against a potentially
+	// compromised server. Exponential backoff with no max elapsed time
+	// matches the WS client's behaviour.
+	attestBackoff := backoff.NewExponentialBackOff()
+	attestBackoff.MaxElapsedTime = 0
+
 	for {
 		pollingTimer := time.NewTimer(time.Millisecond * time.Duration(h.pollingIntervalMs.Load()))
 		select {
 		case <-h.hasPendingMessage:
 			// Have something to send. Stop the polling timer and send what we have.
 			pollingTimer.Stop()
-			h.makeOneRequestRoundtrip(ctx)
+			if attestationFailed := h.makeOneRequestRoundtrip(ctx); attestationFailed {
+				interval := attestBackoff.NextBackOff()
+				h.logger.Errorf(ctx, "Payload trust verification failed, will retry in %v.", interval)
+				timer := time.NewTimer(interval)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				}
+			} else {
+				attestBackoff.Reset()
+			}
 
 		case <-pollingTimer.C:
 			// Polling interval has passed. Force a status update.
@@ -205,18 +228,19 @@ func (h *HTTPSender) SetRequestHeader(baseHeaders http.Header, headerFunc func(h
 
 // makeOneRequestRoundtrip sends a request and receives a response.
 // It will retry the request if the server responds with too many
-// requests or unavailable status.
-func (h *HTTPSender) makeOneRequestRoundtrip(ctx context.Context) {
+// requests or unavailable status. It returns true if the response
+// failed attestation verification so the caller can apply backoff.
+func (h *HTTPSender) makeOneRequestRoundtrip(ctx context.Context) bool {
 	resp, err := h.sendRequestWithRetries(ctx)
 	if err != nil {
 		h.logger.Errorf(ctx, "%v", err)
-		return
+		return false
 	}
 	if resp == nil {
 		// No request was sent and nothing to receive.
-		return
+		return false
 	}
-	h.receiveResponse(ctx, resp)
+	return h.receiveResponse(ctx, resp)
 }
 
 // requestResult represents the outcome of a single HTTP request attempt.
@@ -388,12 +412,15 @@ func (h *HTTPSender) prepareRequest(ctx context.Context) (*requestWrapper, error
 	return &req, nil
 }
 
-func (h *HTTPSender) receiveResponse(ctx context.Context, resp *http.Response) {
+// receiveResponse decodes and processes a server response. It returns
+// true when the response failed payload trust verification so the
+// caller can apply attestation-specific backoff before retrying.
+func (h *HTTPSender) receiveResponse(ctx context.Context, resp *http.Response) bool {
 	msgBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		_ = resp.Body.Close()
 		h.logger.Errorf(ctx, "cannot read response body: %v", err)
-		return
+		return false
 	}
 	_ = resp.Body.Close()
 
@@ -417,13 +444,14 @@ func (h *HTTPSender) receiveResponse(ctx context.Context, resp *http.Response) {
 		if h.attestation != nil && isAttestationFailure(err) {
 			h.logger.Errorf(ctx, "Payload trust verification failed; resetting attestation state: %v", err)
 			h.attestation.Reset()
-		} else {
-			h.logger.Errorf(ctx, "cannot unmarshal response: %v", err)
+			return true
 		}
-		return
+		h.logger.Errorf(ctx, "cannot unmarshal response: %v", err)
+		return false
 	}
 
 	h.receiveProcessor.ProcessReceivedMessage(ctx, &response)
+	return false
 }
 
 func (h *HTTPSender) SetHeartbeatInterval(duration time.Duration) error {
