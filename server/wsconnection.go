@@ -35,6 +35,8 @@ type wsConnection struct {
 	wsConn    *websocket.Conn
 	closed    atomic.Bool
 
+	maxMessageSize int64
+
 	// requiresNegotiation is fixed at construction. When true the
 	// server has a PayloadSigner configured and Send is rejected until
 	// negotiated flips to true. When false (no server-side signer),
@@ -60,9 +62,10 @@ type wsConnection struct {
 
 var _ types.Connection = (*wsConnection)(nil)
 
-func newWSConnection(wsConn *websocket.Conn, requiresNegotiation bool) *wsConnection {
+func newWSConnection(wsConn *websocket.Conn, maxMessageSize int64, requiresNegotiation bool) *wsConnection {
 	return &wsConnection{
 		wsConn:              wsConn,
+		maxMessageSize:      maxMessageSize,
 		requiresNegotiation: requiresNegotiation,
 	}
 }
@@ -111,10 +114,10 @@ func (c *wsConnection) Send(ctx context.Context, message *protobufs.ServerToAgen
 		if err != nil {
 			return err
 		}
-		return internal.WriteWSMessage(c.wsConn, env)
+		return internal.WriteWSMessage(c.wsConn, env, c.maxMessageSize)
 	}
 
-	return internal.WriteWSMessage(c.wsConn, message)
+	return internal.WriteWSMessage(c.wsConn, message, c.maxMessageSize)
 }
 
 func (c *wsConnection) Disconnect() error {

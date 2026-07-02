@@ -18,7 +18,6 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/open-telemetry/opamp-go/client/internal/utils"
 	"github.com/open-telemetry/opamp-go/client/types"
 	"github.com/open-telemetry/opamp-go/internal"
 	"github.com/open-telemetry/opamp-go/protobufs"
@@ -65,6 +64,7 @@ type HTTPSender struct {
 	callbacks          types.Callbacks
 	pollingIntervalMs  atomic.Int64
 	compressionEnabled bool
+	maxMessageSize     int64
 
 	// Headers to send with all requests.
 	getHeader func() http.Header
@@ -85,12 +85,24 @@ func NewHTTPSender(logger types.Logger) *HTTPSender {
 	h := &HTTPSender{
 		SenderCommon: NewSenderCommon(),
 		logger:       logger,
-		client:       utils.NewHttpClient(),
 	}
 	h.pollingIntervalMs.Store(defaultPollingIntervalMs)
+	h.maxMessageSize = internal.DefaultMaxMessageSize
 	// initialize the headers with no additional headers
 	h.SetRequestHeader(nil, nil)
 	return h
+}
+
+// SetHTTPClient sets the HTTP client used to send OpAMP requests.
+// It must be called before Run, SetProxy, or AddTLSConfig.
+func (h *HTTPSender) SetHTTPClient(client *http.Client) {
+	h.client = client
+}
+
+// SetMaxMessageSize sets the maximum message size in bytes. Messages
+// larger than this limit are rejected before sending.
+func (h *HTTPSender) SetMaxMessageSize(maxMessageSize int64) {
+	h.maxMessageSize = internal.ResolveMaxMessageSize(maxMessageSize)
 }
 
 // SetProxy will force each request to use passed proxy and use the passed headers when making a CONNECT request to the proxy.
@@ -324,8 +336,9 @@ func (h *HTTPSender) attemptRequest(ctx context.Context, req *requestWrapper, cu
 
 	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
 		retryInterval := recalculateInterval(currentInterval, resp)
-		_, _ = io.Copy(io.Discard, resp.Body) // to allow connection reuse.
-		_ = resp.Body.Close()
+		if err := h.discardResponseBody(resp); err != nil {
+			return requestResult{resp: nil, err: err, retry: false}
+		}
 		return requestResult{
 			resp:     nil,
 			err:      fmt.Errorf("server response code=%d", resp.StatusCode),
@@ -334,8 +347,9 @@ func (h *HTTPSender) attemptRequest(ctx context.Context, req *requestWrapper, cu
 		}
 
 	default:
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
+		if err := h.discardResponseBody(resp); err != nil {
+			return requestResult{resp: nil, err: err, retry: false}
+		}
 		return requestResult{
 			resp:  nil,
 			err:   fmt.Errorf("invalid response from server: %d", resp.StatusCode),
@@ -368,6 +382,10 @@ func (h *HTTPSender) prepareRequest(ctx context.Context) (*requestWrapper, error
 		return nil, err
 	}
 
+	if err := internal.CheckSizeLimit(int64(len(data)), h.maxMessageSize, "request body"); err != nil {
+		return nil, err
+	}
+
 	r, err := http.NewRequestWithContext(ctx, OpAMPPlainHTTPMethod, h.url, nil)
 	if err != nil {
 		return nil, err
@@ -389,15 +407,9 @@ func (h *HTTPSender) prepareRequest(ctx context.Context) (*requestWrapper, error
 	} else {
 		req.bodyReader = bodyReader(data)
 	}
-
-	// Provide GetBody so net/http can replay the request body when
-	// following a method-preserving redirect (307/308). Without this,
-	// the http.Client returns "http: can't replay request body" before
-	// re-issuing the redirected POST.
-	br := req.bodyReader
-	r.GetBody = func() (io.ReadCloser, error) {
-		return br(), nil
-	}
+	// Set GetBody so the standard library can replay the body when following
+	// 307/308 redirects (which preserve the request method).
+	r.GetBody = func() (io.ReadCloser, error) { return req.bodyReader(), nil }
 
 	req.Header = h.getHeader()
 
@@ -416,13 +428,11 @@ func (h *HTTPSender) prepareRequest(ctx context.Context) (*requestWrapper, error
 // true when the response failed payload trust verification so the
 // caller can apply attestation-specific backoff before retrying.
 func (h *HTTPSender) receiveResponse(ctx context.Context, resp *http.Response) bool {
-	msgBytes, err := io.ReadAll(resp.Body)
+	msgBytes, err := h.readResponseBody(resp)
 	if err != nil {
-		_ = resp.Body.Close()
 		h.logger.Errorf(ctx, "cannot read response body: %v", err)
 		return false
 	}
-	_ = resp.Body.Close()
 
 	var response protobufs.ServerToAgent
 	if err := unwrapServerToAgent(ctx, h.attestation, msgBytes, &response); err != nil {
@@ -452,6 +462,37 @@ func (h *HTTPSender) receiveResponse(ctx context.Context, resp *http.Response) b
 
 	h.receiveProcessor.ProcessReceivedMessage(ctx, &response)
 	return false
+}
+
+// readResponseBody reads the response body, decompressing gzip if indicated
+// by Content-Encoding, and enforces maxMessageSize.
+func (h *HTTPSender) readResponseBody(resp *http.Response) ([]byte, error) {
+	defer resp.Body.Close()
+	if resp.Header.Get(headerContentEncoding) == encodingTypeGZip {
+		gr, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+		defer gr.Close()
+		return internal.ReadAllLimited(gr, h.maxMessageSize, "response body")
+	}
+	return internal.ReadAllLimited(resp.Body, h.maxMessageSize, "response body")
+}
+
+// discardResponseBody drains and closes the response body, decompressing
+// gzip if indicated by Content-Encoding and enforcing maxMessageSize. This
+// allows the underlying TCP connection to be reused for subsequent requests.
+func (h *HTTPSender) discardResponseBody(resp *http.Response) error {
+	defer resp.Body.Close()
+	if resp.Header.Get(headerContentEncoding) == encodingTypeGZip {
+		gr, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return err
+		}
+		defer gr.Close()
+		return internal.CopyDiscardLimited(gr, h.maxMessageSize, "response body")
+	}
+	return internal.CopyDiscardLimited(resp.Body, h.maxMessageSize, "response body")
 }
 
 func (h *HTTPSender) SetHeartbeatInterval(duration time.Duration) error {

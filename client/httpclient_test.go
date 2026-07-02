@@ -23,11 +23,56 @@ import (
 	"github.com/open-telemetry/opamp-go/protobufs"
 )
 
+type recordingRoundTripper struct {
+	base     http.RoundTripper
+	requests int64
+}
+
+func (r *recordingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	atomic.AddInt64(&r.requests, 1)
+	return r.base.RoundTrip(req)
+}
+
+func (r *recordingRoundTripper) RequestCount() int64 {
+	return atomic.LoadInt64(&r.requests)
+}
+
+func TestHTTPClientUsesStartSettingsClient(t *testing.T) {
+	srv := internal.StartMockServer(t)
+	defer srv.Close()
+
+	var rcvCounter int64
+	srv.SetOnMessage(func(msg *protobufs.AgentToServer) *protobufs.ServerToAgent {
+		require.NotNil(t, msg)
+		atomic.AddInt64(&rcvCounter, 1)
+		return nil
+	})
+
+	transport := &recordingRoundTripper{base: http.DefaultTransport}
+	settings := types.StartSettings{
+		OpAMPServerURL: "http://" + srv.Endpoint,
+		Client:         &http.Client{Transport: transport},
+	}
+	client := NewHTTP(nil)
+	prepareClient(t, &settings, client)
+
+	client.sender.SetPollingInterval(time.Millisecond * 10)
+
+	require.NoError(t, client.Start(context.Background(), settings))
+	defer func() {
+		require.NoError(t, client.Stop(context.Background()))
+	}()
+
+	eventually(t, func() bool {
+		return atomic.LoadInt64(&rcvCounter) >= 1 && transport.RequestCount() >= 1
+	})
+}
+
 func TestHTTPPolling(t *testing.T) {
 	// Start a Server.
 	srv := internal.StartMockServer(t)
 	var rcvCounter int64
-	srv.OnMessage = func(msg *protobufs.AgentToServer) *protobufs.ServerToAgent {
+	srv.SetOnMessage(func(msg *protobufs.AgentToServer) *protobufs.ServerToAgent {
 		if msg == nil {
 			t.Error("unexpected nil msg")
 			return nil
@@ -35,7 +80,7 @@ func TestHTTPPolling(t *testing.T) {
 		assert.EqualValues(t, rcvCounter, msg.SequenceNum)
 		atomic.AddInt64(&rcvCounter, 1)
 		return nil
-	}
+	})
 
 	// Start a client.
 	settings := types.StartSettings{}
@@ -66,7 +111,7 @@ func TestHTTPClientCompression(t *testing.T) {
 	srv := internal.StartMockServer(t)
 	var reqCounter int64
 
-	srv.OnRequest = func(w http.ResponseWriter, r *http.Request) {
+	srv.SetOnRequest(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&reqCounter, 1)
 		assert.Equal(t, "gzip", r.Header.Get("Content-Encoding"))
 		reader, err := gzip.NewReader(r.Body)
@@ -96,7 +141,7 @@ func TestHTTPClientCompression(t *testing.T) {
 			},
 		})
 		w.WriteHeader(http.StatusOK)
-	}
+	})
 
 	settings := types.StartSettings{EnableCompression: true}
 	settings.OpAMPServerURL = "http://" + srv.Endpoint
@@ -119,7 +164,7 @@ func TestHTTPClientSetPollingInterval(t *testing.T) {
 	// Start a Server.
 	srv := internal.StartMockServer(t)
 	var rcvCounter int64
-	srv.OnMessage = func(msg *protobufs.AgentToServer) *protobufs.ServerToAgent {
+	srv.SetOnMessage(func(msg *protobufs.AgentToServer) *protobufs.ServerToAgent {
 		if msg == nil {
 			t.Error("unexpected nil msg")
 			return nil
@@ -127,7 +172,7 @@ func TestHTTPClientSetPollingInterval(t *testing.T) {
 		assert.EqualValues(t, rcvCounter, msg.SequenceNum)
 		atomic.AddInt64(&rcvCounter, 1)
 		return nil
-	}
+	})
 
 	// Start a client.
 	settings := types.StartSettings{}
@@ -167,7 +212,7 @@ func TestHTTPClientStartWithHeartbeatInterval(t *testing.T) {
 			// Start a Server.
 			srv := internal.StartMockServer(t)
 			var rcvCounter int64
-			srv.OnMessage = func(msg *protobufs.AgentToServer) *protobufs.ServerToAgent {
+			srv.SetOnMessage(func(msg *protobufs.AgentToServer) *protobufs.ServerToAgent {
 				if msg == nil {
 					t.Error("unexpected nil msg")
 					return nil
@@ -175,7 +220,7 @@ func TestHTTPClientStartWithHeartbeatInterval(t *testing.T) {
 				assert.EqualValues(t, rcvCounter, msg.SequenceNum)
 				atomic.AddInt64(&rcvCounter, 1)
 				return nil
-			}
+			})
 
 			// Start a client.
 			heartbeat := 10 * time.Millisecond
@@ -348,7 +393,7 @@ func TestHTTPReportsAvailableComponents(t *testing.T) {
 			// Start a Server.
 			srv := internal.StartMockServer(t)
 			var rcvCounter atomic.Uint64
-			srv.OnMessage = func(msg *protobufs.AgentToServer) *protobufs.ServerToAgent {
+			srv.SetOnMessage(func(msg *protobufs.AgentToServer) *protobufs.ServerToAgent {
 				assert.EqualValues(t, rcvCounter.Load(), msg.SequenceNum)
 				rcvCounter.Add(1)
 				time.Sleep(50 * time.Millisecond)
@@ -390,7 +435,7 @@ func TestHTTPReportsAvailableComponents(t *testing.T) {
 				// all subsequent messages should not have any available components
 				require.Nil(t, msg.GetAvailableComponents())
 				return nil
-			}
+			})
 
 			// Start a client.
 			settings := types.StartSettings{}
@@ -455,7 +500,7 @@ func TestHTTPSenderOpAMPInstanceUIDHeader(t *testing.T) {
 	// Start a server.
 	srv := internal.StartMockServer(t)
 	var connCnt atomic.Int32
-	srv.OnConnect = func(r *http.Request) {
+	srv.SetOnConnect(func(r *http.Request) {
 		// Get request header
 		hdrUid := r.Header.Get("OpAMP-Instance-UID")
 
@@ -471,8 +516,8 @@ func TestHTTPSenderOpAMPInstanceUIDHeader(t *testing.T) {
 		assert.EqualValues(t, uid.String(), hdrUid)
 
 		connCnt.Add(1)
-	}
-	srv.OnMessage = func(msg *protobufs.AgentToServer) *protobufs.ServerToAgent {
+	})
+	srv.SetOnMessage(func(msg *protobufs.AgentToServer) *protobufs.ServerToAgent {
 		return &protobufs.ServerToAgent{
 			InstanceUid: msg.InstanceUid,
 			AgentIdentification: &protobufs.AgentIdentification{
@@ -480,7 +525,7 @@ func TestHTTPSenderOpAMPInstanceUIDHeader(t *testing.T) {
 			},
 			Flags: uint64(protobufs.ServerToAgentFlags_ServerToAgentFlags_ReportFullState),
 		}
-	}
+	})
 
 	header := http.Header{}
 

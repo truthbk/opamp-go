@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/open-telemetry/opamp-go/client/internal"
+	"github.com/open-telemetry/opamp-go/client/internal/utils"
 	"github.com/open-telemetry/opamp-go/client/types"
 	sharedinternal "github.com/open-telemetry/opamp-go/internal"
 	"github.com/open-telemetry/opamp-go/protobufs"
@@ -45,8 +46,15 @@ func (c *httpClient) Start(ctx context.Context, settings types.StartSettings) er
 
 	c.opAMPServerURL = settings.OpAMPServerURL
 
+	httpClient := settings.Client
+	if httpClient == nil {
+		httpClient = utils.NewHttpClient()
+	}
+	c.sender.SetHTTPClient(httpClient)
+
 	// Prepare Server connection settings.
 	c.sender.SetRequestHeader(settings.Header, settings.HeaderFunc)
+	c.sender.SetMaxMessageSize(settings.MaxMessageSize)
 
 	// Add TLS configuration into httpClient
 	c.sender.AddTLSConfig(settings.TLSConfig)
