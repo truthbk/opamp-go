@@ -1,3 +1,4 @@
 [submodule "internal/opamp-spec"]
 	path = internal/opamp-spec
-	url = git@github.com:open-telemetry/opamp-spec.git
+	url = git@github.com:truthbk/opamp-spec.git
+	branch = jaime/x509-spec-full-protocol
