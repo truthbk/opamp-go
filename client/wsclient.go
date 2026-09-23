@@ -64,6 +64,10 @@ type wsClient struct {
 	// connection. responseChain should only be referred to by the goroutine that
 	// runs tryConnectOnce and its synchronous callees.
 	responseChain []*http.Response
+
+	// backoffPolicy returns a fresh policy controlling the delay between
+	// connection retry attempts for each connect sequence.
+	backoffPolicy types.BackoffPolicyFunc
 }
 
 // NewWebSocket creates a new OpAMP Client that uses WebSocket transport.
@@ -125,6 +129,8 @@ func (c *wsClient) Start(ctx context.Context, settings types.StartSettings) erro
 	c.getHeader = func() http.Header {
 		return headerFunc(baseHeader.Clone())
 	}
+
+	c.backoffPolicy = settings.BackoffPolicy
 
 	c.common.StartConnectAndRun(c.runUntilStopped)
 
@@ -305,16 +311,26 @@ func (c *wsClient) tryConnectOnce(ctx context.Context) (retryAfter sharedinterna
 // Continuously try until connected. Will return nil when successfully
 // connected. Will return error if it is cancelled via context.
 func (c *wsClient) ensureConnected(ctx context.Context) error {
-	infiniteBackoff := backoff.NewExponentialBackOff()
-
-	// Make ticker run forever.
-	infiniteBackoff.MaxElapsedTime = 0
+	var bpolicy types.BackoffPolicy
+	if c.backoffPolicy != nil {
+		bpolicy = c.backoffPolicy()
+	} else {
+		b := backoff.NewExponentialBackOff()
+		b.MaxElapsedTime = 0
+		bpolicy = b
+	}
 
 	interval := time.Duration(0)
 
 	for {
 		timer := time.NewTimer(interval)
-		interval = infiniteBackoff.NextBackOff()
+		next := bpolicy.NextBackOff()
+		if next < 0 {
+			err := errors.New("invalid backoff policy time")
+			c.lastInternalErr.Store(&err)
+			return err
+		}
+		interval = next
 
 		select {
 		case <-timer.C:
@@ -362,7 +378,11 @@ func (c *wsClient) ensureConnected(ctx context.Context) error {
 // When Stop() is called (ctx is cancelled, isStopping is set), wsClient will shutdown gracefully:
 //  1. sender will be cancelled by the ctx, send the close message to server and return the error via sender.Err().
 //  2. runOneCycle will handle that error and wait for the close message from server until timeout.
-func (c *wsClient) runOneCycle(ctx context.Context, sendFirstMessage bool) {
+//
+// Returns true if the cycle ended because of a payload trust verification
+// failure (wrong CA, bad signature, etc.). The caller should apply exponential
+// backoff before retrying in that case.
+func (c *wsClient) runOneCycle(ctx context.Context, sendFirstMessage bool) (attestationFailed bool, connectionFailed bool) {
 	if err := c.ensureConnected(ctx); err != nil {
 		// Can't connect, so can't move forward. This currently happens when we
 		// are being stopped.
@@ -409,6 +429,9 @@ func (c *wsClient) runOneCycle(ctx context.Context, sendFirstMessage bool) {
 		c.common.PackagesStateProvider,
 		&c.common.PackageSyncMutex,
 		c.common.DownloadReporterInterval,
+		c.common.PayloadVerifier,
+		c.url.String(),
+		c.common.PayloadTOFUEnroller,
 	)
 
 	// When the wsclient is closed, the context passed to runOneCycle will be canceled.
@@ -423,6 +446,13 @@ func (c *wsClient) runOneCycle(ctx context.Context, sendFirstMessage bool) {
 		// sender will send close message to initiate the close handshake
 		if err := c.sender.StoppingErr(); err != nil {
 			c.common.Logger.Debugf(ctx, "Error stopping the sender: %v", err)
+
+			// If the sender noticed the broken connection first (before the
+			// receiver), still treat it as an abnormal connection failure
+			// when attestation is enabled so the caller backs off.
+			if c.common.PayloadVerifier != nil || c.common.PayloadTOFUEnroller != nil {
+				connectionFailed = true
+			}
 
 			stopReceiver()
 			<-r.IsStopped()
@@ -444,19 +474,71 @@ func (c *wsClient) runOneCycle(ctx context.Context, sendFirstMessage bool) {
 
 		stopSender()
 		<-c.sender.IsStopped()
+		attestationFailed = r.WasAttestationFailure()
+		connectionFailed = r.WasConnectionError()
 	}
+	return
 }
 
 func (c *wsClient) runUntilStopped(ctx context.Context) {
 	// Iterates until we detect that the client is stopping.
 	sendFirstMessage := true
+
+	// Separate backoff for application-level reconnects. ensureConnected
+	// already backs off TCP-level dial failures within a single
+	// runOneCycle call, but two failure modes connect successfully at the
+	// transport layer and only fail afterwards:
+	//   1. the client's own attestation check rejects a message, or
+	//   2. the server accepts the connection and then drops it abnormally
+	//      (with attestation on, this almost always means the server
+	//      cannot sign — e.g. its signing/policy backend is down).
+	// In both cases ensureConnected would immediately succeed again on the
+	// next call (TCP is fine). Without this outer backoff the client would
+	// spin in a tight reconnect loop as fast as the network allows, which
+	// is contrary to the spec's SHOULD-exponential-backoff requirement.
+	reconnectBackoff := backoff.NewExponentialBackOff()
+	reconnectBackoff.MaxElapsedTime = 0 // retry forever
+
 	for {
 		if c.common.IsStopping() {
 			return
 		}
 
-		c.runOneCycle(ctx, sendFirstMessage)
+		attestationFailed, connectionFailed := c.runOneCycle(ctx, sendFirstMessage)
+		switch {
+		case attestationFailed:
+			interval := reconnectBackoff.NextBackOff()
+			c.common.Logger.Errorf(ctx, "Payload trust verification failed, will retry in %v.", interval)
+			if !c.sleepWithBackoff(ctx, interval) {
+				return
+			}
+		case connectionFailed:
+			interval := reconnectBackoff.NextBackOff()
+			c.common.Logger.Errorf(ctx, "Connection closed abnormally, will retry in %v.", interval)
+			if !c.sleepWithBackoff(ctx, interval) {
+				return
+			}
+		default:
+			// Productive cycle: reset so the next failure starts backoff
+			// from the initial interval again.
+			reconnectBackoff.Reset()
+		}
+
 		sendFirstMessage = false
+	}
+}
+
+// sleepWithBackoff waits for the given interval or until the context is
+// cancelled. It returns true if the interval elapsed, or false if the
+// context was cancelled (the caller should stop).
+func (c *wsClient) sleepWithBackoff(ctx context.Context, interval time.Duration) bool {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
