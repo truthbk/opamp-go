@@ -1,12 +1,27 @@
 package types
 
 import (
+	"context"
 	"crypto/tls"
+	"net"
 	"net/http"
 	"time"
 
 	"github.com/open-telemetry/opamp-go/protobufs"
+	"github.com/open-telemetry/opamp-go/signing"
 )
+
+// BackoffPolicy controls the delay between consecutive connection or request
+// retry attempts. The client calls NextBackOff to determine how long to wait
+// before the next one.
+type BackoffPolicy interface {
+	// NextBackOff returns the duration to wait before the next retry.
+	NextBackOff() time.Duration
+}
+
+// BackoffPolicyFunc returns a fresh BackoffPolicy. The client invokes it at
+// the start of each retry sequence.
+type BackoffPolicyFunc func() BackoffPolicy
 
 // StartSettings defines the parameters for starting the OpAMP Client.
 type StartSettings struct {
@@ -29,6 +44,24 @@ type StartSettings struct {
 
 	// Optional TLS config for HTTP connection.
 	TLSConfig *tls.Config
+
+	// DialContext, if set, overrides how the client establishes the underlying
+	// network connection. The network and addr arguments passed to it are
+	// derived from OpAMPServerURL but may be ignored by the implementation,
+	// e.g. to dial a filesystem-path Unix domain socket regardless of the
+	// (cosmetic) OpAMPServerURL host:
+	//
+	//   DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+	//       return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+	//   }
+	//
+	// In that case OpAMPServerURL still supplies the scheme, path, and Host
+	// header (e.g. "ws://localhost/v1/opamp" or "http://localhost/v1/opamp").
+	// For the HTTP transport, Client.Transport must be an *http.Transport (or
+	// nil) so the dialer can be applied; Start() returns an error otherwise.
+	// Setting both DialContext and ProxyURL is not supported; Start() returns
+	// an error if both are set.
+	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 
 	// Optional Proxy configuration
 	// The ProxyURL may be http(s) or socks5; if no schema is specified http is assumed.
@@ -56,6 +89,19 @@ type StartSettings struct {
 	// If nil then ReportsPackageStatuses and AcceptsPackages capabilities will be disabled,
 	// i.e. package status reporting and syncing from the Server will be disabled.
 	PackagesStateProvider PackagesStateProvider
+
+	// PayloadTrustProvider enables payload trust verification (Message
+	// Attestation): the server's trust chain is validated and every message's
+	// signature verified. It MUST be set if and only if the capabilities
+	// include AgentCapabilities_RequiresPayloadTrustVerification.
+	//
+	// The leaf's SANs are matched against the host of OpAMPServerURL, even
+	// when DialContext connects elsewhere (for example a Unix socket).
+	//
+	// Use signing.FixedAnchor for a pre-configured trust anchor, or
+	// signing.TOFUAnchor for Trust On First Use enrollment (which also
+	// requires the AcceptsPayloadTrustAnchorTOFU capability).
+	PayloadTrustProvider signing.PayloadTrustProvider
 
 	// Defines the capabilities of the Agent. AgentCapabilities_ReportsStatus bit does not need to
 	// be set in this field, it will be set automatically since it is required by OpAMP protocol.
@@ -89,4 +135,12 @@ type StartSettings struct {
 	// If nil, the default reporter interval (10s) will be used.
 	// If specified a minimum value of 1s will be enforced.
 	DownloadReporterInterval *time.Duration
+
+	// Optional BackoffPolicy returns a fresh policy controlling the delay between
+	// consecutive retry attempts when a connection (WebSocket) or request
+	// (HTTP) fails. It is invoked at the start of each retry sequence, so every
+	// sequence begins from the returned policy's initial state. If nil, a
+	// default exponential backoff is used that retries indefinitely.
+	// See BackoffPolicy and BackoffPolicyFunc for details.
+	BackoffPolicy BackoffPolicyFunc
 }

@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/open-telemetry/opamp-go/server/types"
+	"github.com/open-telemetry/opamp-go/signing"
 )
 
 // Settings contains the settings for attaching an OpAMP Server.
@@ -35,6 +36,13 @@ type Settings struct {
 	// https://github.com/open-telemetry/opamp-spec/blob/main/specification.md#customcapabilities
 	// for more details.
 	CustomCapabilities []string
+
+	// PayloadSigner, when non-nil, enables Message Attestation: the Server
+	// advertises OffersPayloadTrustVerification, and on connections whose
+	// Agent requires payload trust verification it sends every ServerToAgent
+	// signed, in a SignedServerToAgent envelope. nil keeps the standard wire
+	// format.
+	PayloadSigner signing.Signer
 }
 
 // StartSettings contains the settings for starting an OpAMP Server.
@@ -42,7 +50,16 @@ type StartSettings struct {
 	Settings
 
 	// ListenEndpoint specifies the endpoint to listen on, e.g. "127.0.0.1:4320"
+	// Ignored if Listener is set.
 	ListenEndpoint string
+
+	// Listener, if set, is used to accept connections instead of opening a TCP
+	// listener on ListenEndpoint. This allows serving OpAMP over an arbitrary
+	// net.Listener, e.g. a filesystem-path Unix domain socket created with
+	// net.Listen("unix", path). When set, ListenEndpoint is ignored. The server
+	// closes the Listener when Stop() is called (via http.Server.Shutdown); the
+	// caller only needs to close it if Start() returns an error.
+	Listener net.Listener
 
 	// ListenPath specifies the URL path on which to accept the OpAMP connections
 	// If this is empty string then Start() will use the default "/v1/opamp" path.

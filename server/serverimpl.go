@@ -137,6 +137,7 @@ func (s *server) Start(settings StartSettings) error {
 		}
 		err = s.startHttpServer(
 			listenAddr,
+			settings.Listener,
 			func(l net.Listener) error {
 				defer httpServerServeWg.Done()
 				return hs.ServeTLS(l, "", "")
@@ -148,6 +149,7 @@ func (s *server) Start(settings StartSettings) error {
 		}
 		err = s.startHttpServer(
 			listenAddr,
+			settings.Listener,
 			func(l net.Listener) error {
 				defer httpServerServeWg.Done()
 				return hs.Serve(l)
@@ -157,17 +159,21 @@ func (s *server) Start(settings StartSettings) error {
 	return err
 }
 
-func (s *server) startHttpServer(listenAddr string, serveFunc func(l net.Listener) error) error {
-	// If the listen address is not specified use the default.
-	ln, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		return err
+func (s *server) startHttpServer(listenAddr string, listener net.Listener, serveFunc func(l net.Listener) error) error {
+	ln := listener
+	if ln == nil {
+		// No listener was provided, open a TCP listener on the listen address.
+		var err error
+		ln, err = net.Listen("tcp", listenAddr)
+		if err != nil {
+			return err
+		}
 	}
 	s.addr = ln.Addr()
 
 	// Begin serving connections in the background.
 	go func() {
-		err = serveFunc(ln)
+		err := serveFunc(ln)
 
 		// ErrServerClosed is expected after successful Stop(), so we won't log that
 		// particular error.
@@ -242,7 +248,7 @@ func (s *server) handleWSConnection(reqCtx context.Context, wsConn *websocket.Co
 	if s.settings.MaxMessageSize >= 0 {
 		wsConn.SetReadLimit(s.settings.MaxMessageSize)
 	}
-	agentConn := newWSConnection(wsConn, s.settings.MaxMessageSize)
+	agentConn := newWSConnection(wsConn, s.settings.MaxMessageSize, s.settings.PayloadSigner != nil)
 
 	defer func() {
 		// Close the connection when all is done.
@@ -305,6 +311,16 @@ func (s *server) handleWSConnection(reqCtx context.Context, wsConn *websocket.Co
 			continue
 		}
 
+		// The first AgentToServer decides whether this connection is
+		// attested: the Agent requires it and the server has a signer.
+		if !agentConn.isNegotiated() {
+			if s.settings.PayloadSigner != nil && agentRequiresAttestation(request.Capabilities) {
+				tofu := agentRequestsTOFU(request.Capabilities)
+				agentConn.enableSigning(newConnectionSigningState(msgContext, s.settings.PayloadSigner, tofu))
+			}
+			agentConn.markNegotiated()
+		}
+
 		response := connectionCallbacks.OnMessage(msgContext, agentConn, &request)
 		if response == nil { // No send message when 'response' is empty
 			continue
@@ -318,6 +334,10 @@ func (s *server) handleWSConnection(reqCtx context.Context, wsConn *websocket.Co
 				Capabilities: s.settings.CustomCapabilities,
 			}
 			sentCustomCapabilities = true
+		}
+		// Offers signals server capability, whether or not this Agent requires it.
+		if s.settings.PayloadSigner != nil {
+			response.Capabilities = addOffersAttestationBit(response.Capabilities)
 		}
 
 		err = agentConn.Send(msgContext, response)
@@ -419,6 +439,7 @@ func (s *server) handlePlainHTTPRequest(req *http.Request, w http.ResponseWriter
 
 	response := connectionCallbacks.OnMessage(req.Context(), agentConn, &request)
 
+	isNoOp := response == nil
 	if response == nil {
 		response = &protobufs.ServerToAgent{}
 	}
@@ -428,14 +449,39 @@ func (s *server) handlePlainHTTPRequest(req *http.Request, w http.ResponseWriter
 		response.InstanceUid = request.InstanceUid
 	}
 
-	// Return the CustomCapabilities
-	// Note that unlike a WebSocket response, this is included in all HTTP responses.
-	response.CustomCapabilities = &protobufs.CustomCapabilities{
-		Capabilities: s.settings.CustomCapabilities,
+	// Over HTTP every signed response carries the chain; the Agent ignores
+	// it once pinned.
+	var responseMessage proto.Message = response
+	if s.settings.PayloadSigner != nil && agentRequiresAttestation(request.Capabilities) && isNoOp {
+		// A no-op response is sent as an unsigned heartbeat (instance_uid
+		// only), so it omits CustomCapabilities and the Offers bit.
+		responseMessage = &protobufs.ServerToAgent{InstanceUid: response.InstanceUid}
+	} else {
+		// Return the CustomCapabilities
+		// Note that unlike a WebSocket response, this is included in all HTTP responses.
+		response.CustomCapabilities = &protobufs.CustomCapabilities{
+			Capabilities: s.settings.CustomCapabilities,
+		}
+
+		if s.settings.PayloadSigner != nil {
+			response.Capabilities = addOffersAttestationBit(response.Capabilities)
+
+			if agentRequiresAttestation(request.Capabilities) {
+				tofu := agentRequestsTOFU(request.Capabilities)
+				state := newConnectionSigningState(req.Context(), s.settings.PayloadSigner, tofu)
+				envelope, sigErr := state.signOutgoing(req.Context(), response)
+				if sigErr != nil {
+					s.logger.Errorf(req.Context(), "Cannot sign HTTP response: %v", sigErr)
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				responseMessage = envelope
+			}
+		}
 	}
 
 	// Marshal the response.
-	bodyBytes, err = proto.Marshal(response)
+	bodyBytes, err = proto.Marshal(responseMessage)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return

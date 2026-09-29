@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sync"
@@ -21,6 +22,7 @@ import (
 	"github.com/open-telemetry/opamp-go/client/types"
 	"github.com/open-telemetry/opamp-go/internal"
 	"github.com/open-telemetry/opamp-go/protobufs"
+	"github.com/open-telemetry/opamp-go/signing"
 )
 
 const (
@@ -70,6 +72,13 @@ type HTTPSender struct {
 
 	// Processor to handle received messages.
 	receiveProcessor receivedProcessor
+
+	// attestation, when non-nil, verifies inbound responses.
+	attestation *attestationState
+
+	// backoffPolicy returns a fresh policy controlling the delay between
+	// request retry attempts for each request sequence.
+	backoffPolicy types.BackoffPolicyFunc
 }
 
 // NewHTTPSender creates a new Sender that uses HTTP to send messages
@@ -87,7 +96,7 @@ func NewHTTPSender(logger types.Logger) *HTTPSender {
 }
 
 // SetHTTPClient sets the HTTP client used to send OpAMP requests.
-// It must be called before Run, SetProxy, or AddTLSConfig.
+// It must be called before Run, SetProxy, SetDialContext, or AddTLSConfig.
 func (h *HTTPSender) SetHTTPClient(client *http.Client) {
 	h.client = client
 }
@@ -107,18 +116,44 @@ func (h *HTTPSender) SetProxy(proxy string, headers http.Header) error {
 		return url.InvalidHostError(proxy)
 	}
 
-	proxyTransport := &http.Transport{}
-	if h.client.Transport != nil {
-		transport, ok := h.client.Transport.(*http.Transport)
-		if !ok {
-			return fmt.Errorf("unable to coorce client transport as *http.Transport detected type is: %T", h.client.Transport)
-		}
-		proxyTransport = transport.Clone()
+	proxyTransport, err := h.cloneTransport()
+	if err != nil {
+		return err
 	}
 	proxyTransport.Proxy = http.ProxyURL(proxyURL)
 	proxyTransport.ProxyConnectHeader = headers
 	h.client.Transport = proxyTransport
 	return nil
+}
+
+// SetDialContext overrides how the underlying network connection is established,
+// e.g. to dial a Unix domain socket.
+// This method is not thread safe and must be called before h.client is used.
+func (h *HTTPSender) SetDialContext(dialContext func(ctx context.Context, network, addr string) (net.Conn, error)) error {
+	if dialContext == nil {
+		return nil
+	}
+	transport, err := h.cloneTransport()
+	if err != nil {
+		return err
+	}
+	transport.DialContext = dialContext
+	h.client.Transport = transport
+	return nil
+}
+
+// cloneTransport returns a copy of the client's transport suitable for modification,
+// or a fresh transport if none is set. It returns an error if the transport is not
+// an *http.Transport, since its settings could not be preserved.
+func (h *HTTPSender) cloneTransport() (*http.Transport, error) {
+	if h.client.Transport == nil {
+		return &http.Transport{}, nil
+	}
+	transport, ok := h.client.Transport.(*http.Transport)
+	if !ok {
+		return nil, fmt.Errorf("unable to coerce client transport as *http.Transport detected type is: %T", h.client.Transport)
+	}
+	return transport.Clone(), nil
 }
 
 // Run starts the processing loop that will perform the HTTP request/response.
@@ -129,16 +164,25 @@ func (h *HTTPSender) SetProxy(proxy string, headers http.Header) error {
 // Run continues until ctx is cancelled.
 func (h *HTTPSender) Run(
 	ctx context.Context,
-	url string,
+	serverURL string,
 	callbacks types.Callbacks,
 	clientSyncedState *ClientSyncedState,
 	packagesStateProvider types.PackagesStateProvider,
 	packageSyncMutex *sync.Mutex,
 	reporterInterval time.Duration,
+	payloadVerifier signing.Verifier,
+	tofuEnroller signing.TOFUEnroller,
 ) {
-	h.url = url
+	h.url = serverURL
 	h.callbacks = callbacks
 	h.receiveProcessor = newReceivedProcessor(h.logger, callbacks, h, clientSyncedState, packagesStateProvider, packageSyncMutex, reporterInterval)
+	if payloadVerifier != nil || tofuEnroller != nil {
+		var serverName string
+		if parsed, err := url.Parse(h.url); err == nil {
+			serverName = parsed.Hostname()
+		}
+		h.attestation = newAttestationState(payloadVerifier, serverName, tofuEnroller)
+	}
 
 	// we need to detect if the redirect was ever set, if not, we want default behaviour
 	if callbacks.CheckRedirect != nil {
@@ -148,13 +192,30 @@ func (h *HTTPSender) Run(
 		}
 	}
 
+	// Back off after attestation failures rather than retrying at the
+	// polling rate against a server that fails verification.
+	attestBackoff := backoff.NewExponentialBackOff()
+	attestBackoff.MaxElapsedTime = 0
+
 	for {
 		pollingTimer := time.NewTimer(time.Millisecond * time.Duration(h.pollingIntervalMs.Load()))
 		select {
 		case <-h.hasPendingMessage:
 			// Have something to send. Stop the polling timer and send what we have.
 			pollingTimer.Stop()
-			h.makeOneRequestRoundtrip(ctx)
+			if attestationFailed := h.makeOneRequestRoundtrip(ctx); attestationFailed {
+				interval := attestBackoff.NextBackOff()
+				h.logger.Errorf(ctx, "Payload trust verification failed, will retry in %v.", interval)
+				timer := time.NewTimer(interval)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				}
+			} else {
+				attestBackoff.Reset()
+			}
 
 		case <-pollingTimer.C:
 			// Polling interval has passed. Force a status update.
@@ -195,18 +256,19 @@ func (h *HTTPSender) SetRequestHeader(baseHeaders http.Header, headerFunc func(h
 
 // makeOneRequestRoundtrip sends a request and receives a response.
 // It will retry the request if the server responds with too many
-// requests or unavailable status.
-func (h *HTTPSender) makeOneRequestRoundtrip(ctx context.Context) {
+// requests or unavailable status. It returns true if the response failed
+// attestation.
+func (h *HTTPSender) makeOneRequestRoundtrip(ctx context.Context) bool {
 	resp, err := h.sendRequestWithRetries(ctx)
 	if err != nil {
 		h.logger.Errorf(ctx, "%v", err)
-		return
+		return false
 	}
 	if resp == nil {
 		// No request was sent and nothing to receive.
-		return
+		return false
 	}
-	h.receiveResponse(ctx, resp)
+	return h.receiveResponse(ctx, resp)
 }
 
 // requestResult represents the outcome of a single HTTP request attempt.
@@ -233,15 +295,24 @@ func (h *HTTPSender) sendRequestWithRetries(ctx context.Context) (*http.Response
 	}
 
 	// Repeatedly try requests with a backoff strategy.
-	infiniteBackoff := backoff.NewExponentialBackOff()
-	// Make backoff run forever.
-	infiniteBackoff.MaxElapsedTime = 0
+	var bpolicy types.BackoffPolicy
+	if h.backoffPolicy != nil {
+		bpolicy = h.backoffPolicy()
+	} else {
+		b := backoff.NewExponentialBackOff()
+		b.MaxElapsedTime = 0
+		bpolicy = b
+	}
 
 	interval := time.Duration(0)
 
 	for {
 		timer := time.NewTimer(interval)
-		interval = infiniteBackoff.NextBackOff()
+		next := bpolicy.NextBackOff()
+		if next < 0 {
+			return nil, errors.New("invalid backoff policy time")
+		}
+		interval = next
 
 		select {
 		case <-timer.C:
@@ -420,20 +491,30 @@ func (h *HTTPSender) discardResponseBody(resp *http.Response) error {
 	return internal.CopyDiscardLimited(body, h.maxMessageSize, "response body")
 }
 
-func (h *HTTPSender) receiveResponse(ctx context.Context, resp *http.Response) {
+// receiveResponse processes a server response, returning true if it failed
+// attestation.
+func (h *HTTPSender) receiveResponse(ctx context.Context, resp *http.Response) bool {
 	msgBytes, err := h.readResponseBody(resp)
 	if err != nil {
 		h.logger.Errorf(ctx, "cannot read response body: %v", err)
-		return
+		return false
 	}
 
 	var response protobufs.ServerToAgent
-	if err := proto.Unmarshal(msgBytes, &response); err != nil {
+	if err := unwrapServerToAgent(ctx, h.attestation, msgBytes, &response); err != nil {
+		// There is no connection to terminate: drop the response and
+		// Reset, so the next poll redoes the trust-chain handshake.
+		if h.attestation != nil && isAttestationFailure(err) {
+			h.logger.Errorf(ctx, "Payload trust verification failed; resetting attestation state: %v", err)
+			h.attestation.Reset()
+			return true
+		}
 		h.logger.Errorf(ctx, "cannot unmarshal response: %v", err)
-		return
+		return false
 	}
 
 	h.receiveProcessor.ProcessReceivedMessage(ctx, &response)
+	return false
 }
 
 func (h *HTTPSender) SetHeartbeatInterval(duration time.Duration) error {
@@ -460,19 +541,27 @@ func (h *HTTPSender) EnableCompression() {
 	h.compressionEnabled = true
 }
 
+// SetBackoffPolicy sets the factory that produces a fresh backoff policy for
+// each request retry sequence.
+func (h *HTTPSender) SetBackoffPolicy(p types.BackoffPolicyFunc) {
+	h.backoffPolicy = p
+}
+
 func (h *HTTPSender) SetMaxMessageSize(maxMessageSize int64) {
 	h.maxMessageSize = internal.ResolveMaxMessageSize(maxMessageSize)
 }
 
-func (h *HTTPSender) AddTLSConfig(config *tls.Config) {
-	if config != nil {
-		tlsTransport := &http.Transport{}
-		if h.client.Transport != nil {
-			if transport, ok := h.client.Transport.(*http.Transport); ok {
-				tlsTransport = transport.Clone()
-			}
-		}
-		tlsTransport.TLSClientConfig = config
-		h.client.Transport = tlsTransport
+// AddTLSConfig sets the TLS configuration on the client's transport.
+// This method is not thread safe and must be called before h.client is used.
+func (h *HTTPSender) AddTLSConfig(config *tls.Config) error {
+	if config == nil {
+		return nil
 	}
+	tlsTransport, err := h.cloneTransport()
+	if err != nil {
+		return err
+	}
+	tlsTransport.TLSClientConfig = config
+	h.client.Transport = tlsTransport
+	return nil
 }
