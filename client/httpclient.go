@@ -57,7 +57,13 @@ func (c *httpClient) Start(ctx context.Context, settings types.StartSettings) er
 	c.sender.SetMaxMessageSize(settings.MaxMessageSize)
 
 	// Add TLS configuration into httpClient
-	c.sender.AddTLSConfig(settings.TLSConfig)
+	if err := c.sender.AddTLSConfig(settings.TLSConfig); err != nil {
+		return err
+	}
+
+	if err := c.sender.SetDialContext(settings.DialContext); err != nil {
+		return err
+	}
 
 	if settings.EnableCompression {
 		c.sender.EnableCompression()
@@ -68,6 +74,8 @@ func (c *httpClient) Start(ctx context.Context, settings types.StartSettings) er
 			return err
 		}
 	}
+
+	c.sender.SetBackoffPolicy(settings.BackoffPolicy)
 
 	// Prepare the first message to send.
 	err := c.common.PrepareFirstMessage(ctx)
@@ -155,6 +163,7 @@ func (c *httpClient) runUntilStopped(ctx context.Context) {
 	// Start the HTTP sender. This will make request/responses with retries for
 	// failures and will wait with configured polling interval if there is nothing
 	// to send.
+	payloadVerifier, tofuEnroller := c.common.PayloadTrust()
 	c.sender.Run(
 		ctx,
 		c.opAMPServerURL,
@@ -163,6 +172,8 @@ func (c *httpClient) runUntilStopped(ctx context.Context) {
 		c.common.PackagesStateProvider,
 		&c.common.PackageSyncMutex,
 		c.common.DownloadReporterInterval,
+		payloadVerifier,
+		tofuEnroller,
 	)
 }
 

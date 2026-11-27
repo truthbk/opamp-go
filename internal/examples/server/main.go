@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"syscall"
 
 	"github.com/open-telemetry/opamp-go/internal/examples/server/data"
 	"github.com/open-telemetry/opamp-go/internal/examples/server/opampsrv"
@@ -17,6 +18,9 @@ func main() {
 	var emitMetrics bool
 	flag.BoolVar(&emitMetrics, "emit-metrics", false, "Emit metrics to stdout.")
 
+	var noTLS bool
+	flag.BoolVar(&noTLS, "no-tls", false, "Serve the OpAMP endpoint without TLS, accepting plaintext (ws://) connections. Useful when testing OpAMP clients that do not support TLS yet.")
+
 	flag.Parse()
 
 	curDir, err := os.Getwd()
@@ -28,12 +32,12 @@ func main() {
 
 	uisrv.Start(curDir)
 	opampSrv := opampsrv.NewServer(&data.AllAgents, emitMetrics)
-	opampSrv.Start()
+	opampSrv.Start(noTLS)
 
 	logger.Println("OpAMP Server running...")
 
 	interrupt := make(chan os.Signal, 1)
-	signal.Notify(interrupt, os.Interrupt)
+	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
 	<-interrupt
 
 	logger.Println("OpAMP Server shutting down...")
